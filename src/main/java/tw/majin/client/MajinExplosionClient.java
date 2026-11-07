@@ -7,11 +7,13 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.network.PacketByteBuf;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.Identifier;
 import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
 import org.lwjgl.glfw.GLFW;
 import tw.majin.network.AbilityPayload;
 import tw.majin.network.BlastSyncPayload;
+import tw.majin.network.ChargeSyncPayload;
 
 public final class MajinExplosionClient implements ClientModInitializer {
     private static KeyBinding chargeKey;
@@ -40,6 +42,12 @@ public final class MajinExplosionClient implements ClientModInitializer {
                     client.execute(() -> BlastSphereRenderer.accept(snapshot));
                 });
 
+        ClientPlayNetworking.registerGlobalReceiver(ChargeSyncPayload.ID,
+                (client, handler, buf, responseSender) -> {
+                    ChargeSyncPayload.Snapshot snapshot = ChargeSyncPayload.read(buf);
+                    client.execute(() -> BlastSphereRenderer.acceptCharge(snapshot));
+                });
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             BlastSphereRenderer.tick(client);
             // Avoid retaining a key-down state after disconnect/server switch.
@@ -55,7 +63,21 @@ public final class MajinExplosionClient implements ClientModInitializer {
                 wasCharging = charging;
             }
             while (explodeKey.wasPressed()) {
+                // H must be sent while the G-held session exists on the server.
                 send(AbilityPayload.Action.RELEASE_EXPLOSION);
+            }
+            if (charging) {
+                // Client-side input suppression for responsive locking; the server
+                // also pins the player so spoofed movement packets cannot bypass it.
+                client.player.input.movementForward = 0.0F;
+                client.player.input.movementSideways = 0.0F;
+                client.player.input.pressingForward = false;
+                client.player.input.pressingBack = false;
+                client.player.input.pressingLeft = false;
+                client.player.input.pressingRight = false;
+                client.player.input.jumping = false;
+                client.player.input.sneaking = false;
+                client.player.setVelocity(Vec3d.ZERO);
             }
         });
     }

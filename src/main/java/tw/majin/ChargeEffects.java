@@ -10,6 +10,7 @@ import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.particle.BlockStateParticleEffect;
 import net.minecraft.particle.ParticleTypes;
+import tw.majin.visual.ChargeField;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -24,30 +25,70 @@ public final class ChargeEffects {
 
     private ChargeEffects() {}
 
-    /** Every server tick while G is actively held; ignores other players by design. */
-    public static void pullMobs(ServerPlayerEntity player, double progress, boolean doDamage) {
+    /**
+     * Wind pulls creatures toward the OUTER surface of a physical spherical field.
+     * Travel is harmless. The sphere is server-collidable even though its visual
+     * surface is a client-rendered mesh rather than a vanilla Minecraft entity.
+     */
+    public static void pullMobs(ServerPlayerEntity player, EffectsState effects,
+                                double progress, int ageTicks, boolean damageEnabled) {
         ServerWorld world = player.getServerWorld();
-        double radius = 6.0 + 18.0 * progress; // 6 to 24 blocks
-        Vec3d target = player.getPos().add(0.0, 0.95, 0.0);
-        Box area = player.getBoundingBox().expand(radius);
+        double range = ChargeField.suctionRadius(progress);
+        Vec3d center = player.getPos().add(0.0, 1.0, 0.0);
+        Box area = player.getBoundingBox().expand(range);
         for (LivingEntity mob : world.getEntitiesByClass(LivingEntity.class, area,
                 entity -> entity.isAlive() && !(entity instanceof PlayerEntity))) {
-            Vec3d delta = target.subtract(mob.getPos().add(0.0, mob.getHeight() * 0.5, 0.0));
-            double distanceSq = delta.lengthSquared();
-            if (distanceSq > radius * radius || distanceSq < 0.0001) continue;
-            double distance = Math.sqrt(distanceSq);
-            // Stronger suction with charge, but velocity is capped to avoid launching mobs.
-            if (distance > 1.8) {
-                double pull = 0.055 + 0.115 * progress;
-                Vec3d next = mob.getVelocity().multiply(0.78).add(delta.multiply(pull / distance));
-                double speed = next.length();
-                if (speed > 0.75) next = next.multiply(0.75 / speed);
-                mob.setVelocity(next);
+            Vec3d mobCenter = mob.getPos().add(0.0, mob.getHeight() * 0.5, 0.0);
+            Vec3d offset = mobCenter.subtract(center);
+            double distanceSquared = offset.lengthSquared();
+            if (distanceSquared > range * range) continue;
+            double collisionRadius = ChargeField.mobContactRadius(progress, mob.getWidth());
+            double distance = Math.sqrt(distanceSquared);
+            if (ChargeField.touchesShell(offset.x, offset.y, offset.z,
+                    progress, mob.getWidth())) {
+                // Stop at the sphere, not at the player. A very small displacement
+                // maintains the same height so ground mobs don't float upward.
+                double flat = Math.hypot(offset.x, offset.z);
+                double clearance = ChargeField.minimumHorizontalDistance(
+                        collisionRadius, offset.y);
+                if (flat < clearance && clearance > 0.001) {
+                    double nx = flat > 0.001 ? offset.x / flat : 1.0;
+                    double nz = flat > 0.001 ? offset.z / flat : 0.0;
+                    mob.setPosition(center.x + nx * clearance, mob.getY(),
+                            center.z + nz * clearance);
+                }
+                mob.setVelocity(Vec3d.ZERO);
+                mob.velocityModified = true;
+                mob.fallDistance = 0.0F;
+                // A separate per-target cooldown: first contact then at most 1 HP
+                // every 20 ticks while touching; never during the approach.
+                Integer previous = effects.lastSphereDamageTick.get(mob.getUuid());
+                if (damageEnabled && (previous == null || ageTicks - previous >= 20)) {
+                    mob.damage(world.getDamageSources().magic(), 1.0F);
+                    effects.lastSphereDamageTick.put(mob.getUuid(), ageTicks);
+                }
+            } else if (distance > 0.001) {
+                effects.lastSphereDamageTick.remove(mob.getUuid());
+                // Gradually steer inward, no overshoot into the player collider.
+                double pull = 0.20 + 0.28 * progress;
+                Vec3d inward = offset.multiply(-pull / distance);
+                Vec3d velocity = mob.getVelocity().multiply(0.55).add(inward);
+                double speed = velocity.length();
+                if (speed > 0.9) velocity = velocity.multiply(0.9 / speed);
+                // Cap the distance travelled so next tick cannot leap past the shell.
+                double allowance = Math.max(0.0, distance - collisionRadius - 0.04);
+                if (velocity.length() > allowance) {
+                    velocity = allowance <= 0.001 ? Vec3d.ZERO
+                            : velocity.normalize().multiply(allowance);
+                }
+                mob.setVelocity(velocity);
                 mob.velocityModified = true;
                 mob.fallDistance = 0.0F;
             }
-            // Fixed 9 HP attempt every 20 server ticks, rather than every frame.
-            if (doDamage) mob.damage(player.getDamageSources().magic(), 9.0F);
+        }
+        if (ageTicks % 40 == 0) {
+            effects.lastSphereDamageTick.entrySet().removeIf(
+                    entry -> ageTicks - entry.getValue() > 80);
         }
     }
 
@@ -110,7 +151,7 @@ public final class ChargeEffects {
             }
             Vec3d toCenter = target.subtract(entity.getPos());
             double distance = toCenter.length();
-            if (distance <= 1.45) {
+            if (distance <= ChargeField.sphereRadius(progress) + 0.25) {
                 shatter(world, entity, debris.state);
                 iterator.remove();
             } else if (debris.age >= MAX_DEBRIS_LIFETIME_TICKS || distance > 40.0) {
@@ -133,8 +174,8 @@ public final class ChargeEffects {
         Vec3d point = entity.getPos();
         world.spawnParticles(new BlockStateParticleEffect(ParticleTypes.BLOCK, state),
                 point.x, point.y, point.z, 20, 0.38, 0.38, 0.38, 0.14);
-        world.spawnParticles(ParticleTypes.FLAME, point.x, point.y, point.z,
-                5, 0.27, 0.27, 0.27, 0.01);
+        world.spawnParticles(ParticleTypes.END_ROD, point.x, point.y, point.z,
+                3, 0.2, 0.2, 0.2, 0.01);
         entity.discard();
     }
 
@@ -143,10 +184,12 @@ public final class ChargeEffects {
             if (!debris.entity.isRemoved()) debris.entity.discard();
         });
         effects.debris.clear();
+        effects.lastSphereDamageTick.clear();
     }
 
     public static final class EffectsState {
         private final Map<UUID, Debris> debris = new HashMap<>();
+        private final Map<UUID, Integer> lastSphereDamageTick = new HashMap<>();
         public int activeDebrisCount() { return debris.size(); }
     }
 

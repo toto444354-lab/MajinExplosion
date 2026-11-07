@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = '0.7.0'
+VERSION = '0.8.0'
 
 
 def run(args):
@@ -22,7 +22,7 @@ def main():
     print('Majin Explosion build check (Fabric 1.20.1)', flush=True)
     if not shutil.which('javac'):
         sys.exit('ERROR: JDK 17+ (javac) is required')
-    tests = [f'tests/check_stage{n}.py' for n in range(3, 8)]
+    tests = [f'tests/check_stage{n}.py' for n in range(3, 9)]
     for test in tests:
         run([sys.executable, test])
     wrapper = ROOT / ('gradlew.bat' if sys.platform == 'win32' else 'gradlew')

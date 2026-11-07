@@ -19,6 +19,9 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 import tw.majin.network.BlastSyncPayload;
+import tw.majin.network.ChargeSyncPayload;
+import tw.majin.visual.ChargeField;
+import tw.majin.visual.ChargeRules;
 import tw.majin.visual.BlastGeometry;
 import tw.majin.visual.BlastTimeline;
 import tw.majin.visual.BlastVisualProfile;
@@ -30,6 +33,7 @@ import tw.majin.visual.BlastVisualProfile;
  */
 public final class BlastSphereRenderer {
     private static final Map<UUID, ActiveBlast> BLASTS = new HashMap<>();
+    private static final Map<UUID, ActiveCharge> CHARGES = new HashMap<>();
     private static final int LATITUDES = 12;
     private static final int LONGITUDES = 32;
     private static final int SHOCK_SEGMENTS = 96;
@@ -48,6 +52,7 @@ public final class BlastSphereRenderer {
         if (world != rememberedWorld) {
             rememberedWorld = world;
             BLASTS.clear();
+            CHARGES.clear();
         }
         if (snapshot.age() >= BlastGeometry.DURATION_TICKS) {
             BLASTS.remove(snapshot.id());
@@ -61,10 +66,29 @@ public final class BlastSphereRenderer {
         }
     }
 
+    /** Receive a stable 3-D charge sphere; remove immediately on G-up or H. */
+    public static void acceptCharge(ChargeSyncPayload.Snapshot snapshot) {
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null || !world.getRegistryKey().getValue().equals(snapshot.dimension())) return;
+        if (world != rememberedWorld) {
+            rememberedWorld = world;
+            BLASTS.clear();
+            CHARGES.clear();
+        }
+        if (!snapshot.active()) {
+            CHARGES.remove(snapshot.casterId());
+        } else {
+            ActiveCharge existing = CHARGES.get(snapshot.casterId());
+            if (existing == null) CHARGES.put(snapshot.casterId(), new ActiveCharge(snapshot));
+            else existing.update(snapshot);
+        }
+    }
+
     public static void tick(MinecraftClient client) {
         if (client.world != rememberedWorld) {
             rememberedWorld = client.world;
-            BLASTS.clear(); // Prevent stale lightballs when changing dimension/world.
+            BLASTS.clear();
+            CHARGES.clear(); // Prevent stale lightballs when changing dimension/world.
         }
         if (client.world == null) return;
         Iterator<ActiveBlast> iterator = BLASTS.values().iterator();
@@ -73,10 +97,18 @@ public final class BlastSphereRenderer {
             blast.age = BlastTimeline.advanceAge(blast.age);
             if (blast.age >= BlastGeometry.DURATION_TICKS + 2) iterator.remove();
         }
+        Iterator<ActiveCharge> chargeIterator = CHARGES.values().iterator();
+        while (chargeIterator.hasNext()) {
+            ActiveCharge charge = chargeIterator.next();
+            charge.age++;
+            charge.ticks = Math.min(ChargeRules.MAX_TICKS, charge.ticks + 1);
+            // A lost stop packet or vanished chunk cannot leave a charge mesh forever.
+            if (++charge.ticksSinceUpdate > 80) chargeIterator.remove();
+        }
     }
 
     private static void render(WorldRenderContext context) {
-        if (BLASTS.isEmpty() || context.matrixStack() == null) return;
+        if ((BLASTS.isEmpty() && CHARGES.isEmpty()) || context.matrixStack() == null) return;
         Vec3d camera = context.camera().getPos();
         MatrixStack matrices = context.matrixStack();
         RenderSystem.enableBlend();
@@ -131,6 +163,33 @@ public final class BlastSphereRenderer {
                 shell(transform, core, 255, 255, 230, 70, 20, -age * 0.25, 0.0);
                 matrices.pop();
             }
+            for (ActiveCharge charge : CHARGES.values()) {
+                Vec3d center = new Vec3d(charge.snapshot.x(), charge.snapshot.y(), charge.snapshot.z());
+                if (center.squaredDistanceTo(camera) > 100.0 * 100.0) continue;
+                double progress = ChargeField.clamp(
+                        (charge.ticks + (double) context.tickDelta()) / ChargeRules.MAX_TICKS);
+                double radius = ChargeField.sphereRadius(progress);
+                double age = charge.age + (double) context.tickDelta();
+                double phase = ChargeField.clockwisePhase(age, progress);
+                matrices.push();
+                matrices.translate(center.x - camera.x, center.y - camera.y, center.z - camera.z);
+                Matrix4f transform = matrices.peek().getPositionMatrix();
+                // The charge visual is a genuinely continuous yellow spherical mesh
+                // rather than FLAME particles or a ring of points. Radius matches
+                // the server-owned sphere collision boundary exactly.
+                chargeShell(transform, radius * 1.04, 255, 149, 16,
+                        35, 28, phase, 0.35);
+                chargeShell(transform, radius, 255, 197, 30,
+                        76, 120, phase, 1.0);
+                chargeShell(transform, radius * 0.965, 255, 230, 67,
+                        82, 74, phase * 1.2, 0.85);
+                chargeShell(transform, radius * 0.88, 255, 248, 149,
+                        27, 30, phase * 1.4, 0.4);
+                // Wispy air streaks slide inward from the full suction range,
+                // simultaneously curling clockwise around the sphere.
+                windRibbons(transform, age, progress, phase);
+                matrices.pop();
+            }
         } finally {
             RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
             RenderSystem.depthMask(true);
@@ -143,6 +202,20 @@ public final class BlastSphereRenderer {
     private static void shell(Matrix4f matrix, double radius,
                               int red, int green, int blue, int baseAlpha,
                               int stripeAlpha, double phase, double stripeIntensity) {
+        surface(matrix, radius, BlastGeometry.VERTICAL_SCALE,
+                red, green, blue, baseAlpha, stripeAlpha, phase, stripeIntensity);
+    }
+
+    private static void chargeShell(Matrix4f matrix, double radius,
+                                    int red, int green, int blue, int baseAlpha,
+                                    int stripeAlpha, double phase, double stripeIntensity) {
+        surface(matrix, radius, 1.0,
+                red, green, blue, baseAlpha, stripeAlpha, phase, stripeIntensity);
+    }
+
+    private static void surface(Matrix4f matrix, double radius, double verticalScale,
+                                int red, int green, int blue, int baseAlpha,
+                                int stripeAlpha, double phase, double stripeIntensity) {
         Tessellator tessellator = Tessellator.getInstance();
         BufferBuilder builder = tessellator.getBuffer();
         builder.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
@@ -152,13 +225,13 @@ public final class BlastSphereRenderer {
             for (int lon = 0; lon < LONGITUDES; lon++) {
                 double theta0 = Math.PI * 2.0 * lon / LONGITUDES;
                 double theta1 = Math.PI * 2.0 * (lon + 1) / LONGITUDES;
-                vertex(builder, matrix, radius, phi0, theta0, red, green, blue,
+                vertex(builder, matrix, radius, verticalScale, phi0, theta0, red, green, blue,
                         alpha(baseAlpha, stripeAlpha, stripeIntensity, phi0, theta0, phase));
-                vertex(builder, matrix, radius, phi1, theta0, red, green, blue,
+                vertex(builder, matrix, radius, verticalScale, phi1, theta0, red, green, blue,
                         alpha(baseAlpha, stripeAlpha, stripeIntensity, phi1, theta0, phase));
-                vertex(builder, matrix, radius, phi1, theta1, red, green, blue,
+                vertex(builder, matrix, radius, verticalScale, phi1, theta1, red, green, blue,
                         alpha(baseAlpha, stripeAlpha, stripeIntensity, phi1, theta1, phase));
-                vertex(builder, matrix, radius, phi0, theta1, red, green, blue,
+                vertex(builder, matrix, radius, verticalScale, phi0, theta1, red, green, blue,
                         alpha(baseAlpha, stripeAlpha, stripeIntensity, phi0, theta1, phase));
             }
         }
@@ -208,15 +281,98 @@ public final class BlastSphereRenderer {
         return Math.min(255, base + (int) (stripes * intensity * spiral));
     }
 
+    /**
+     * Client-side tapered 3D airflow streamlines. A streamlet travels from the
+     * outer suction radius towards the spherical boundary (decreasing radius),
+     * while its angular phase increases clockwise as seen from directly above.
+     * Uses no vanilla fire particles and requires no server particle packets.
+     */
+    private static void windRibbons(Matrix4f matrix, double age,
+                                    double progress, double phase) {
+        Tessellator tessellator = Tessellator.getInstance();
+        BufferBuilder builder = tessellator.getBuffer();
+        builder.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        final int streams = 32;
+        final int trailSegments = 6;
+        // Pull radius and ball radius are the same constants as the server collider.
+        double speed = 0.018 + 0.015 * progress;
+        for (int stream = 0; stream < streams; stream++) {
+            // Offset starts so the air currents are distributed around the body.
+            double head = fract(age * speed + stream * 0.61803398875);
+            double base = stream * 2.399963229728653;
+            for (int trail = 0; trail < trailSegments; trail++) {
+                double older = head - (trail + 1) * 0.027;
+                double newer = head - trail * 0.027;
+                if (older < 0.0 || newer > 1.0) continue;
+                Vec3d p0 = windPoint(older, base, phase, stream, progress);
+                Vec3d p1 = windPoint(newer, base, phase, stream, progress);
+                double dx = p1.x - p0.x;
+                double dz = p1.z - p0.z;
+                double planar = Math.hypot(dx, dz);
+                if (planar < 0.0001) continue;
+                double width = 0.042 + progress * 0.052;
+                double sideX = -dz / planar * width;
+                double sideZ = dx / planar * width;
+                int alphaTail = Math.max(1, (int) ((18 + 54 * progress) * older));
+                int alphaHead = Math.max(1, (int) ((25 + 90 * progress) * newer));
+                windVertex(builder, matrix, p0, sideX, sideZ, 255, 241, 174, alphaTail);
+                windVertex(builder, matrix, p0, -sideX, -sideZ, 255, 241, 174, alphaTail);
+                windVertex(builder, matrix, p1, -sideX, -sideZ, 255, 250, 209, alphaHead);
+                windVertex(builder, matrix, p1, sideX, sideZ, 255, 250, 209, alphaHead);
+            }
+        }
+        tessellator.draw();
+    }
+
+    private static Vec3d windPoint(double inwards, double base, double phase,
+                                   int stream, double progress) {
+        // inwards increases with time and pulls this streak onto the sphere.
+        double radius = ChargeField.windRadius(progress, inwards);
+        double angle = base + phase + inwards * (0.7 + 0.8 * progress);
+        double rise = Math.sin(stream * 2.15 + inwards * 5.0) * (0.65 + progress * 1.1);
+        return new Vec3d(Math.cos(angle) * radius, rise, Math.sin(angle) * radius);
+    }
+
+    private static double fract(double x) {
+        return x - Math.floor(x);
+    }
+
+    private static void windVertex(BufferBuilder builder, Matrix4f matrix, Vec3d position,
+                                   double sx, double sz,
+                                   int red, int green, int blue, int alpha) {
+        builder.vertex(matrix, (float) (position.x + sx), (float) position.y,
+                (float) (position.z + sz)).color(red, green, blue, alpha).next();
+    }
+
     private static void vertex(BufferBuilder builder, Matrix4f transform, double radius,
-                               double latitude, double angle,
+                               double verticalScale, double latitude, double angle,
                                int r, int g, int b, int a) {
         double horizontal = radius * Math.cos(latitude);
         builder.vertex(transform,
                 (float) (horizontal * Math.cos(angle)),
-                (float) (BlastGeometry.verticalRadius(radius) * Math.sin(latitude)),
+                (float) (radius * verticalScale * Math.sin(latitude)),
                 (float) (horizontal * Math.sin(angle)))
                 .color(r, g, b, a).next();
+    }
+
+    private static final class ActiveCharge {
+        private ChargeSyncPayload.Snapshot snapshot;
+        private int age;
+        private int ticks;
+        private int ticksSinceUpdate;
+
+        private ActiveCharge(ChargeSyncPayload.Snapshot snapshot) {
+            this.snapshot = snapshot;
+            this.age = snapshot.visualTicks();
+            this.ticks = snapshot.chargeTicks();
+        }
+
+        private void update(ChargeSyncPayload.Snapshot newer) {
+            this.snapshot = newer;
+            this.age = Math.max(age, newer.visualTicks());
+            this.ticks = Math.max(ticks, newer.chargeTicks());
+            this.ticksSinceUpdate = 0;
+        }
     }
 
     private static final class ActiveBlast {

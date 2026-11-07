@@ -18,12 +18,12 @@ gradle = (ROOT / 'gradle.properties').read_text(encoding='utf-8')
 assert mod['id'] == 'majin_explosion'
 assert mod['depends']['minecraft'] == '1.20.1'
 assert 'minecraft_version=1.20.1' in gradle
-assert any('mod_version=' + v in gradle for v in ('0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0'))
+assert any('mod_version=' + v in gradle for v in ('0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0'))
 assert 'GLFW_KEY_G' in client and 'GLFW_KEY_H' in client
 assert 'Action.STOP_CHARGE' in client
-assert 'MAX_TICKS = 200' in controller
-assert 'state.visualTime % 20 == 0' in controller
-assert 'mob.damage(player.getDamageSources().magic(), 9.0F)' in effects
+assert 'MAX_TICKS = 200' in (src / 'visual/ChargeRules.java').read_text(encoding='utf-8')
+assert 'ChargeEffects.pullMobs(player, state.effects, progress,' in controller
+assert 'mob.damage(world.getDamageSources().magic(), 1.0F)' in effects
 assert '!(entity instanceof PlayerEntity)' in effects
 assert 'FallingBlockEntity.spawnFromBlock' in effects
 assert 'entity.setDestroyedOnLanding()' in effects and 'entity.dropItem = false' not in effects

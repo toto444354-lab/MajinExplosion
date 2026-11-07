@@ -16,13 +16,13 @@ mod = (java / 'MajinExplosionMod.java').read_text(encoding='utf-8')
 client = (java / 'client/MajinExplosionClient.java').read_text(encoding='utf-8')
 renderer = (java / 'client/BlastSphereRenderer.java').read_text(encoding='utf-8')
 props = (root / 'gradle.properties').read_text(encoding='utf-8')
-assert 'mod_version=0.7.0' in props
+assert any('mod_version=' + v in props for v in ('0.7.0', '0.8.0'))
 assert 'properties.setProperty("terrain_absorption_enabled", "false")' in config
 assert 'properties.setProperty("explosion_terrain_enabled", "false")' in config
 assert 'properties.getProperty("explosion_terrain_enabled", "false")' in config
 assert 'properties.getProperty("terrain_absorption_enabled", "false")' in config
-assert 'public static void shutdown()' in controller and 'STATES.clear()' in controller
-assert 'AbilityController.shutdown();' in mod and 'ExplosionEffects.shutdown(server);' in mod
+assert 'public static void shutdown(MinecraftServer server)' in controller and 'STATES.clear()' in controller
+assert 'AbilityController.shutdown(server);' in mod and 'ExplosionEffects.shutdown(server);' in mod
 assert 'wasCharging = false;' in client and 'client.getNetworkHandler() == null' in client
 assert 'entity.dropItem = false' not in (java / 'ChargeEffects.java').read_text(encoding='utf-8')
 assert 'BlastTimeline.reconcileAge(age, incoming.age())' in renderer

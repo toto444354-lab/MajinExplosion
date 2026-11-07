@@ -49,7 +49,7 @@ public final class AbilityConfig {
                 }
             } else {
                 try (OutputStream out = Files.newOutputStream(file)) {
-                    properties.store(out, "Majin Explosion stage 7 - restart to reload");
+                    properties.store(out, "Majin Explosion stage 8 - restart to reload");
                 }
             }
         } catch (IOException ex) {

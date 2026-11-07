@@ -259,7 +259,7 @@ public final class ExplosionEffects {
                 if (!BlastGeometry.inWave(offset.x, offset.y, offset.z, distance)) continue;
                 if (!damagedEntities.add(entity.getUuid())) continue;
                 entity.damage(world.getDamageSources().explosion(null, caster == null ? originalPlayer : caster),
-                        (float) (100.0 * (0.25 + 0.75 * charge)));
+                        9.0F);
                 double length = Math.max(0.01, offset.length());
                 entity.addVelocity(offset.x / length * 1.6, 0.5, offset.z / length * 1.6);
             }

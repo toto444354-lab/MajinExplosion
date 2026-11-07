@@ -16,16 +16,17 @@ public final class MajinExplosionMod implements ModInitializer {
     public void onInitialize() {
         AbilityController.registerTickEvents();
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            AbilityController.clear(handler.player.getUuid());
+            AbilityController.clear(handler.player);
             ExplosionEffects.onDisconnect(handler.player);
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
                 server.execute(() -> {
                     ExplosionEffects.onJoin(handler.player);
                     ExplosionEffects.syncToPlayer(handler.player);
+                    AbilityController.syncToPlayer(handler.player);
                 }));
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-            AbilityController.shutdown();
+            AbilityController.shutdown(server);
             ExplosionEffects.shutdown(server);
         });
         ServerPlayNetworking.registerGlobalReceiver(AbilityPayload.ID,
