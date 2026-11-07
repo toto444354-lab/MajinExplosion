@@ -16,6 +16,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.particle.DustParticleEffect;
 import net.minecraft.particle.BlockStateParticleEffect;
 import net.minecraft.particle.ParticleTypes;
@@ -102,6 +103,24 @@ public final class ExplosionEffects {
         return true;
     }
 
+    /** Command-driven demonstration. The owner watches from outside the blast. */
+    public static boolean startDummy(ServerPlayerEntity owner, ArmorStandEntity dummy,
+                                     int chargeTicks, AbilityConfig config) {
+        if (dummy.isRemoved() || !dummy.isAlive() ||
+                dummy.getWorld() != owner.getServerWorld() ||
+                isDetonating(dummy.getUuid()) || BLASTS.size() >= MAX_SIMULTANEOUS_JOBS) {
+            return false;
+        }
+        double charge = Math.min(1.0, Math.max(0, chargeTicks) / 200.0);
+        int radius = Math.max(2, (int) Math.ceil(MAX_RADIUS * charge));
+        Blast blast = new Blast(owner, dummy, radius, charge, config);
+        BLASTS.add(blast);
+        blast.broadcastSnapshot();
+        blast.world.playSound(null, dummy.getBlockPos(), SoundEvents.ENTITY_GENERIC_EXPLODE,
+                SoundCategory.PLAYERS, 1.8F, 0.7F);
+        return true;
+    }
+
     public static void tick(MinecraftServer server, AbilityConfig config) {
         Iterator<SmokeCloud> smoke = SMOKE_CLOUDS.iterator();
         while (smoke.hasNext()) {
@@ -143,8 +162,12 @@ public final class ExplosionEffects {
 
     public static void shutdown(MinecraftServer server) {
         for (Blast blast : BLASTS) {
-            ServerPlayerEntity player = server.getPlayerManager().getPlayer(blast.casterId);
-            if (player != null && !blast.visualFinished) blast.restoreCaster(player);
+            if (blast.dummy != null) {
+                if (!blast.dummy.isRemoved()) blast.dummy.discard();
+            } else {
+                ServerPlayerEntity player = server.getPlayerManager().getPlayer(blast.casterId);
+                if (player != null && !blast.visualFinished) blast.restoreCaster(player);
+            }
         }
         BLASTS.clear();
         SMOKE_CLOUDS.clear();
@@ -164,6 +187,7 @@ public final class ExplosionEffects {
         private final Vec3d anchor;
         private final Vec3d center;
         private final ServerPlayerEntity originalPlayer;
+        private final ArmorStandEntity dummy;
         private final boolean originallyInvulnerable;
         private final boolean originallyNoGravity;
         private final boolean creativeAtStart;
@@ -178,14 +202,20 @@ public final class ExplosionEffects {
         private double lastSprayedRadius = -1.0;
 
         private Blast(ServerPlayerEntity caster, int radius, double charge, AbilityConfig config) {
-            this.casterId = caster.getUuid();
-            this.world = caster.getServerWorld();
-            this.anchor = caster.getPos();
+            this(caster, null, radius, charge, config);
+        }
+
+        private Blast(ServerPlayerEntity owner, ArmorStandEntity dummy,
+                      int radius, double charge, AbilityConfig config) {
+            this.casterId = dummy == null ? owner.getUuid() : dummy.getUuid();
+            this.world = owner.getServerWorld();
+            this.anchor = dummy == null ? owner.getPos() : dummy.getPos();
             this.center = this.anchor.add(0.0, 1.0, 0.0);
-            this.originalPlayer = caster;
-            this.originallyInvulnerable = caster.isInvulnerable();
-            this.originallyNoGravity = caster.hasNoGravity();
-            this.creativeAtStart = caster.isCreative();
+            this.originalPlayer = owner;
+            this.dummy = dummy;
+            this.originallyInvulnerable = owner.isInvulnerable();
+            this.originallyNoGravity = owner.hasNoGravity();
+            this.creativeAtStart = owner.isCreative();
             this.radius = radius;
             this.charge = charge;
             int down = Math.max(3, (int) Math.ceil(56.0 * charge));
@@ -193,7 +223,7 @@ public final class ExplosionEffects {
             int carveRadius = Math.min(radius, config.maxExplosionTerrainRadius);
             double scale = carveRadius / (double) radius;
             this.carver = config.explosionTerrainEnabled
-                    ? new TerrainCarver(world, caster, center, carveRadius,
+                    ? new TerrainCarver(world, owner, center, carveRadius,
                             Math.max(1, (int) Math.ceil(down * scale)),
                             Math.max(1, (int) Math.ceil(up * scale))) : null;
         }
@@ -215,7 +245,15 @@ public final class ExplosionEffects {
                 } else {
                     age = BlastProgress.advanceToward(age, elapsedTicks, radius, radius, false);
                 }
-                ServerPlayerEntity caster = server.getPlayerManager().getPlayer(casterId);
+                ServerPlayerEntity caster = dummy == null
+                        ? server.getPlayerManager().getPlayer(casterId) : null;
+                if (dummy != null && !dummy.isRemoved()) {
+                    dummy.setVelocity(Vec3d.ZERO);
+                    dummy.velocityModified = true;
+                    if (dummy.getPos().squaredDistanceTo(anchor) > 0.0004) {
+                        dummy.setPosition(anchor.x, anchor.y, anchor.z);
+                    }
+                }
                 if (caster != null && caster.isAlive() && caster.getServerWorld() == world) {
                     lockCaster(caster);
                     if (elapsedTicks % 20 == 0) {
@@ -244,7 +282,9 @@ public final class ExplosionEffects {
                 if (elapsedTicks % 4 == 0 && config.explosionDamageEnabled) hitVolume(caster);
                 if (age >= VISUAL_TICKS) {
                     visualFinished = true;
-                    if (caster != null) {
+                    if (dummy != null) {
+                        if (!dummy.isRemoved()) dummy.discard();
+                    } else if (caster != null) {
                         restoreCaster(caster);
                         if (CasterDeathRule.shouldKill(caster.isCreative(),
                                 config.creativeCasterDeathEnabled)) {
@@ -261,13 +301,17 @@ public final class ExplosionEffects {
                     if (config.residualSmokeEnabled && config.residualSmokeSeconds > 0 &&
                             config.smokeParticlesPerTick > 0) {
                         if (SMOKE_CLOUDS.size() >= MAX_SMOKE_CLOUDS) SMOKE_CLOUDS.remove(0);
-                        SMOKE_CLOUDS.add(new SmokeCloud(world, center, radius,
+                        int smokeRadius = config.explosionTerrainEnabled
+                                ? Math.min(radius, config.maxExplosionTerrainRadius) : radius;
+                        SMOKE_CLOUDS.add(new SmokeCloud(world, center, smokeRadius,
                                 config.residualSmokeSeconds * 20, config.smokeParticlesPerTick));
                     }
                     broadcastSnapshot(); // Final age tells clients to remove this blast.
                     world.spawnParticles(ParticleTypes.FLASH, center.x, center.y, center.z,
                             1, 0.0, 0.0, 0.0, 0.0);
-                    world.playSound(null, caster == null ? originalPlayer.getBlockPos() : caster.getBlockPos(),
+                    world.playSound(null, caster == null ?
+                                    new BlockPos((int) Math.floor(anchor.x), (int) Math.floor(anchor.y),
+                                            (int) Math.floor(anchor.z)) : caster.getBlockPos(),
                             SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 1.1F, 0.55F);
                 }
             } else if (carver != null && !carver.isDone()) {
@@ -418,7 +462,8 @@ public final class ExplosionEffects {
                 if (!BlastDamageGate.canHit(elapsedTicks, lastTick)) continue;
                 boolean accepted = entity.damage(
                         world.getDamageSources().explosion(null,
-                                caster == null ? originalPlayer : caster), 9.0F);
+                                dummy != null ? dummy :
+                                        (caster == null ? originalPlayer : caster)), 9.0F);
                 if (!accepted) continue;
                 lastDamageTick.put(entity.getUuid(), elapsedTicks);
                 Vec3d offset = body.getCenter().subtract(center);
@@ -657,12 +702,15 @@ public final class ExplosionEffects {
             this.center = center;
             this.radius = radius;
             this.lifetimeTicks = lifetimeTicks;
-            this.particlesPerTick = Math.min(24, particlesPerTick);
+            // Hard cap for old configs that may still request 12-24 particles/tick.
+            this.particlesPerTick = Math.min(6, particlesPerTick);
         }
 
         boolean tick() {
             if (++age > lifetimeTicks) return true;
-            // Fade the emissions over time; vanilla smoke particles then disperse.
+            // One small burst every four ticks, fading to an occasional puff.
+            // Prevent old save configs from spawning hundreds of long-lived smoke sprites.
+            if ((age & 3) != 0) return false;
             double fade = 1.0 - age / (double) lifetimeTicks;
             int quantity = (int) Math.ceil(particlesPerTick * fade);
             for (int i = 0; i < quantity; i++) {
@@ -674,8 +722,8 @@ public final class ExplosionEffects {
                 if (!world.isChunkLoaded(bx >> 4, bz >> 4)) continue;
                 double y = world.getTopY(Heightmap.Type.WORLD_SURFACE, bx, bz)
                         + 0.25 + (sample % 5) * 0.24;
-                world.spawnParticles(ParticleTypes.LARGE_SMOKE,
-                        x, y, z, 1, 0.16, 0.10, 0.16, 0.008);
+                world.spawnParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                        x, y, z, 1, 0.05, 0.05, 0.05, 0.003);
             }
             return false;
         }

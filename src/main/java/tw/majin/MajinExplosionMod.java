@@ -15,8 +15,10 @@ public final class MajinExplosionMod implements ModInitializer {
     @Override
     public void onInitialize() {
         AbilityController.registerTickEvents();
+        DummyController.register();
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             AbilityController.clear(handler.player);
+            DummyController.clear(handler.player);
             ExplosionEffects.onDisconnect(handler.player);
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
@@ -24,9 +26,11 @@ public final class MajinExplosionMod implements ModInitializer {
                     ExplosionEffects.onJoin(handler.player);
                     ExplosionEffects.syncToPlayer(handler.player);
                     AbilityController.syncToPlayer(handler.player);
+                    DummyController.syncToPlayer(handler.player);
                 }));
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             AbilityController.shutdown(server);
+            DummyController.shutdown();
             ExplosionEffects.shutdown(server);
         });
         ServerPlayNetworking.registerGlobalReceiver(AbilityPayload.ID,

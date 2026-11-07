@@ -25,6 +25,52 @@ public final class ChargeEffects {
 
     private ChargeEffects() {}
 
+    /** No movement/force is applied: touching the charging sphere is the only damage source. */
+    public static void damageOnContact(ServerWorld world, Vec3d anchor, UUID excluded,
+                                       EffectsState effects, double progress, int ageTicks,
+                                       boolean damageEnabled) {
+        if (!damageEnabled) return;
+        double radius = ChargeField.sphereRadius(progress);
+        Vec3d center = anchor.add(0.0, 1.0, 0.0);
+        Box bounds = new Box(center.x - radius - 3, center.y - radius - 3,
+                center.z - radius - 3, center.x + radius + 3,
+                center.y + radius + 3, center.z + radius + 3);
+        for (LivingEntity mob : world.getEntitiesByClass(LivingEntity.class, bounds,
+                e -> e.isAlive() && !e.isSpectator() && !e.getUuid().equals(excluded))) {
+            Vec3d offset = mob.getBoundingBox().getCenter().subtract(center);
+            if (!ChargeField.touchesShell(offset.x, offset.y, offset.z,
+                    progress, mob.getWidth())) continue;
+            Integer previous = effects.lastSphereDamageTick.get(mob.getUuid());
+            if (previous == null || ageTicks - previous >= 20) {
+                if (mob.damage(world.getDamageSources().magic(), 1.0F)) {
+                    effects.lastSphereDamageTick.put(mob.getUuid(), ageTicks);
+                }
+            }
+        }
+        if (ageTicks % 80 == 0) {
+            effects.lastSphereDamageTick.entrySet().removeIf(
+                    e -> ageTicks - e.getValue() > 80);
+        }
+    }
+
+    /**
+     * Stage 13: natural campfire smoke around the ground-level charge field.
+     * Emits a small, configurable burst (not every tick); vanilla campfire
+     * smoke supplies its own long-lived curl/vertical motion. No suction.
+     */
+    public static void spawnChargingDust(ServerWorld world, Vec3d anchor,
+                                         int ageTicks, double progress, int amount) {
+        int count = Math.max(0, Math.min(10, amount));
+        for (int i = 0; i < count; i++) {
+            double[] sample = tw.majin.visual.ChargeDustPattern.sample(ageTicks, i, progress);
+            // count=0 in the particle packet means one puff with directional
+            // velocity. The upward drift is intentionally very gentle.
+            world.spawnParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                    anchor.x + sample[0], anchor.y + sample[1], anchor.z + sample[2],
+                    0, sample[3], sample[4], sample[5], 0.65);
+        }
+    }
+
     /**
      * Wind pulls creatures toward the OUTER surface of a physical spherical field.
      * Travel is harmless. The sphere is server-collidable even though its visual

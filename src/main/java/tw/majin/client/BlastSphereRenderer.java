@@ -199,8 +199,8 @@ public final class BlastSphereRenderer {
                         82, 74, phase * 1.2, 0.85);
                 chargeShell(transform, radius * 0.88, 255, 248, 149,
                         27, 30, phase * 1.4, 0.4);
-                // Wispy air streaks slide inward from the full suction range,
-                // simultaneously curling clockwise around the sphere.
+                // Stage 13: visibly outward gusts start at the ball surface
+                // and fan into all directions. No mob suction or world physics.
                 windRibbons(transform, age, progress, phase);
                 matrices.pop();
             }
@@ -296,24 +296,22 @@ public final class BlastSphereRenderer {
     }
 
     /**
-     * Sparse, independent streaks that start in ALL directions around the ball,
-     * then travel almost radially inward to its shell. Golden-angle directions
-     * cover the sphere (not a ring); different phases, speeds and short lengths
-     * prevent the old uniform vortex / horizontal spiral look.
+     * Short, scattered gusts FAN OUT from the sphere in 3-D, with a gentle
+     * clockwise curl. One buffer pass for all streaks; capped vertex count.
      */
     private static void windRibbons(Matrix4f matrix, double age,
                                     double progress, double phase) {
         Tessellator tessellator = Tessellator.getInstance();
         BufferBuilder builder = tessellator.getBuffer();
         builder.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        final int streams = 88;
+        final int streams = 56;
         for (int stream = 0; stream < streams; stream++) {
             double seed = fract((stream + 1) * 0.61803398875);
-            double speed = 0.018 + 0.018 * fract(stream * 0.41421356237);
+            double speed = 0.021 + 0.013 * fract(stream * 0.41421356237);
             double head = fract(age * speed * (1.0 + 0.25 * progress) + seed);
-            // Each line is only 2–4 small segments, not a continuous coil.
-            int segments = 2 + (stream % 3);
-            double trailStep = 0.012 + 0.006 * fract(stream * 0.7548776662);
+            // Two small segments per streak to limit vertex count.
+            int segments = 2;
+            double trailStep = 0.022 + 0.010 * fract(stream * 0.7548776662);
             for (int segment = 0; segment < segments; segment++) {
                 double from = head - (segment + 1) * trailStep;
                 double to = head - segment * trailStep;
@@ -343,7 +341,7 @@ public final class BlastSphereRenderer {
 
     private static Vec3d windPoint(double inward, int index, int count,
                                    double progress, double phase) {
-        double[] p = ChargeWind.point(inward, index, count, progress, phase);
+        double[] p = ChargeWind.outwardPoint(inward, index, count, progress, phase);
         return new Vec3d(p[0], p[1], p[2]);
     }
 

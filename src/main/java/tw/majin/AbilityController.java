@@ -19,8 +19,6 @@ import tw.majin.visual.ChargeField;
 
 /** Server-owned, hold-to-charge ability with an anchored caster. */
 public final class AbilityController {
-    private static final int MAX_GLOBAL_ACTIVE_DEBRIS = 128;
-    private static final int MAX_NEW_DEBRIS_PER_SERVER_TICK = 6;
     private static final Map<UUID, ChargeState> STATES = new HashMap<>();
     private static AbilityConfig config;
 
@@ -30,10 +28,6 @@ public final class AbilityController {
         config = AbilityConfig.load();
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             ExplosionEffects.tick(server, config);
-            int activeDebris = STATES.values().stream()
-                    .mapToInt(state -> state.effects.activeDebrisCount()).sum();
-            int spawnBudget = Math.min(MAX_NEW_DEBRIS_PER_SERVER_TICK,
-                    Math.max(0, MAX_GLOBAL_ACTIVE_DEBRIS - activeDebris));
             Iterator<Map.Entry<UUID, ChargeState>> iterator = STATES.entrySet().iterator();
             while (iterator.hasNext()) {
                 Map.Entry<UUID, ChargeState> entry = iterator.next();
@@ -52,23 +46,18 @@ public final class AbilityController {
                 state.ticks = ChargeRules.advance(state.ticks);
                 state.visualTime++;
                 double progress = ChargeField.clamp(state.ticks / (double) ChargeRules.MAX_TICKS);
-                // Mesh and wind are client-drawn; no FLAME particles are spawned here.
+                // Mesh and outward wind are client-drawn; ground smoke is throttled below.
                 if (state.visualTime % 5 == 0) broadcastCharge(entry.getKey(), state, true);
 
-                ChargeEffects.tickDebris(player, state.effects, progress);
-                ChargeEffects.pullMobs(player, state.effects, progress,
+                // Stage 12: NO suction of mobs and NO lifted blocks during charging.
+                // Creatures only take contact damage if they voluntarily touch the sphere.
+                ChargeEffects.damageOnContact(state.world, state.anchor,
+                        player.getUuid(), state.effects, progress,
                         state.visualTime, config.mobDamageEnabled);
-                // Bounded token bucket: no large terrain batches during charging.
-                if (config.terrainAbsorptionEnabled && config.blocksPerSecond > 0) {
-                    state.blockSpawnRemainder += config.blocksPerSecond;
-                    if (state.blockSpawnRemainder >= 20) {
-                        state.blockSpawnRemainder -= 20;
-                        int allowance = Math.min(1, Math.min(spawnBudget,
-                                Math.max(0, config.maxActiveDebrisPerPlayer
-                                        - state.effects.activeDebrisCount())));
-                        int spawned = ChargeEffects.liftBlocks(player, state.effects, progress, allowance);
-                        spawnBudget -= spawned;
-                    }
+                if (config.chargingSmokeParticlesPerBurst > 0 &&
+                        state.visualTime % config.chargingSmokeIntervalTicks == 0) {
+                    ChargeEffects.spawnChargingDust(state.world, state.anchor,
+                            state.visualTime, progress, config.chargingSmokeParticlesPerBurst);
                 }
                 if (state.visualTime % 10 == 0) {
                     player.sendMessage(Text.literal(String.format(
@@ -79,6 +68,8 @@ public final class AbilityController {
         });
     }
 
+    public static AbilityConfig getConfig() { return config; }
+
     public static void startCharge(ServerPlayerEntity player) {
         if (!player.isAlive() || player.isSpectator() ||
                 ExplosionEffects.isDetonating(player.getUuid()) ||
@@ -87,9 +78,8 @@ public final class AbilityController {
         STATES.put(player.getUuid(), state);
         broadcastCharge(player.getUuid(), state, true);
         player.sendMessage(Text.literal("魔人自爆開始蓄力！放開 G 立即取消；按住 G 並按 H 釋放。"), true);
-        if (!config.terrainAbsorptionEnabled || !config.explosionTerrainEnabled) {
-            player.sendMessage(Text.literal(
-                    "提醒：地形吸取／爆炸挖洞在設定檔中可能尚未啟用。"), false);
+        if (!config.explosionTerrainEnabled) {
+            player.sendMessage(Text.literal("提醒：爆炸挖洞目前在設定檔中關閉。"), false);
         }
     }
 
@@ -179,7 +169,6 @@ public final class AbilityController {
         private final boolean originallyNoGravity;
         private int ticks;
         private int visualTime;
-        private int blockSpawnRemainder;
         private final ChargeEffects.EffectsState effects = new ChargeEffects.EffectsState();
 
         private ChargeState(ServerPlayerEntity player) {
