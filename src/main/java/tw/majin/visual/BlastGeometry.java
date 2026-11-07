@@ -6,7 +6,7 @@ package tw.majin.visual;
  * Keeping this class free of Minecraft types makes its mathematics unit-testable.
  */
 public final class BlastGeometry {
-    public static final int DURATION_TICKS = 240;
+    public static final int DURATION_TICKS = 120;
     public static final double VERTICAL_SCALE = 0.52;
     public static final int MAX_RADIUS = 200;
 

@@ -13,7 +13,7 @@ config = (java / 'AbilityConfig.java').read_text(encoding='utf-8')
 modsrc = (java / 'MajinExplosionMod.java').read_text(encoding='utf-8')
 props = (ROOT / 'gradle.properties').read_text(encoding='utf-8')
 meta = json.loads((ROOT / 'src/main/resources/fabric.mod.json').read_text(encoding='utf-8'))
-assert any('mod_version=' + v in props for v in ('0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0', '0.9.0'))
+assert any('mod_version=' + v in props for v in ('0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0'))
 assert meta['id'] == 'majin_explosion'
 assert meta['depends']['minecraft'] == '1.20.1'
 assert 'ExplosionEffects.start(player, state.ticks, config)' in controller
@@ -30,11 +30,11 @@ assert 'player.getDamageSources().genericKill()' in blast
 assert 'world.getDamageSources().explosion' in blast
 assert 'Block.NOTIFY_LISTENERS | Block.SKIP_DROPS' in blast
 assert 'world.isChunkLoaded' in blast
-assert 'state.getHardness(world, pos) < 0.0F' in blast
+assert 'state.getHardness(world, pos) >= 0.0F' in blast
 assert 'state.hasBlockEntity()' in blast
 assert 'world.canPlayerModifyAt(owner, pos)' in blast
-assert 'MAX_BLOCK_SCANS_PER_JOB_TICK = 4096' in blast
-assert 'MAX_COLUMNS_PER_JOB_TICK = 256' in blast
+assert 'MAX_BLOCK_SCANS_PER_JOB_TICK = 32768' in blast
+assert 'MAX_COLUMNS_PER_JOB_TICK = 4096' in blast
 assert 'removals < maxRemovals' in blast
 assert 'MAX_SIMULTANEOUS_JOBS = 2' in blast
 assert 'ExplosionEffects.onDisconnect(handler.player)' in modsrc

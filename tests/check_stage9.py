@@ -13,13 +13,13 @@ blast = (java / "ExplosionEffects.java").read_text()
 render = (java / "client/BlastSphereRenderer.java").read_text()
 sync = (java / "network/BlastSyncPayload.java").read_text()
 config = (java / "AbilityConfig.java").read_text()
-assert "mod_version=0.9.0" in (root / "gradle.properties").read_text()
+assert any("mod_version=" + v in (root / "gradle.properties").read_text() for v in ("0.9.0", "0.10.0"))
 assert "double completedRadius()" in blast
 assert "carver.completedRadius()" in blast
-assert "BlastProgress.advance(age, radius, carver.completedRadius(), true)" in blast
+assert "BlastProgress.advanceToward(age, elapsedTicks, radius," in blast
 assert "hitVolume(caster)" in blast
 assert "BlastGeometry.overlapsBox(" in blast
-assert "damagedEntities.add(entity.getUuid())" in blast
+assert "lastDamageTick.put(entity.getUuid(), elapsedTicks)" in blast
 assert "9.0F" in blast
 assert "snapshot.terrainSynced()" in render
 assert "snapshot.terrainSynced()" in sync

@@ -17,11 +17,11 @@ public final class BlastGeometryTest {
             }
             check(Math.abs(previous - radius) < 1e-9, "radius must hit the configured maximum");
         }
-        check(BlastGeometry.waveRadius(999, 240) == 200, "hard cap at 200");
+        check(BlastGeometry.waveRadius(999, BlastGeometry.DURATION_TICKS) == 200, "hard cap at 200");
         check(BlastGeometry.waveRadius(200, -12) == 0, "negative ages clamp to zero");
-        check(BlastGeometry.waveRadius(200, 300) == 200, "old ages clamp to maximum");
+        check(BlastGeometry.waveRadius(200, BlastGeometry.DURATION_TICKS + 60) == 200, "old ages clamp to maximum");
 
-        for (int t = 1; t <= 240; t++) {
+        for (int t = 1; t <= BlastGeometry.DURATION_TICKS; t++) {
             double phase0 = BlastGeometry.counterclockwisePhase(t - 1, 1.0);
             double phase1 = BlastGeometry.counterclockwisePhase(t, 1.0);
             check(phase1 < phase0, "counterclockwise phase must decrease");

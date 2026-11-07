@@ -6,13 +6,13 @@ public final class BlastTimelineTest {
         require(BlastTimeline.reconcileAge(87, 80) == 87, "late snapshot rewinds animation");
         require(BlastTimeline.reconcileAge(80, 87) == 87, "newer snapshot not applied");
         require(BlastTimeline.reconcileAge(5, -20) == 5, "invalid negative age");
-        require(BlastTimeline.reconcileAge(239, 999) == 240, "age cap");
-        require(BlastTimeline.advanceAge(240) == 241, "one tick grace period");
-        require(BlastTimeline.advanceAge(241) == 242, "terminal age");
-        require(BlastTimeline.advanceAge(242) == 242, "terminal cap");
+        require(BlastTimeline.reconcileAge(BlastGeometry.DURATION_TICKS - 1, 999) == BlastGeometry.DURATION_TICKS, "age cap");
+        require(BlastTimeline.advanceAge(BlastGeometry.DURATION_TICKS) == BlastGeometry.DURATION_TICKS + 1, "one tick grace period");
+        require(BlastTimeline.advanceAge(BlastGeometry.DURATION_TICKS + 1) == BlastGeometry.DURATION_TICKS + 2, "terminal age");
+        require(BlastTimeline.advanceAge(BlastGeometry.DURATION_TICKS + 2) == BlastGeometry.DURATION_TICKS + 2, "terminal cap");
         int age = 0;
         double last = 0;
-        for (int i = 0; i < 240; i++) {
+        for (int i = 0; i < BlastGeometry.DURATION_TICKS; i++) {
             age = BlastTimeline.advanceAge(age);
             if (i % 20 == 0) age = BlastTimeline.reconcileAge(age, i);
             double radius = BlastGeometry.waveRadius(200, age);

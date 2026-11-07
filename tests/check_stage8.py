@@ -14,7 +14,7 @@ client = (base / 'client/MajinExplosionClient.java').read_text(encoding='utf-8')
 mod = (base / 'MajinExplosionMod.java').read_text(encoding='utf-8')
 effects = (base / 'ChargeEffects.java').read_text(encoding='utf-8')
 config = (base / 'AbilityConfig.java').read_text(encoding='utf-8')
-assert 'mod_version=0.9.0' in (root / 'gradle.properties').read_text(encoding='utf-8')
+assert any('mod_version=' + v in (root / 'gradle.properties').read_text(encoding='utf-8') for v in ('0.9.0', '0.10.0'))
 assert 'STATES.remove(player.getUuid())' in controller
 assert 'state.restoreGravity(player)' in controller
 assert 'ChargeEffects.discardAll(state.effects)' in controller
