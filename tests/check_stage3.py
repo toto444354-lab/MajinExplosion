@@ -18,7 +18,7 @@ gradle = (ROOT / 'gradle.properties').read_text(encoding='utf-8')
 assert mod['id'] == 'majin_explosion'
 assert mod['depends']['minecraft'] == '1.20.1'
 assert 'minecraft_version=1.20.1' in gradle
-assert any('mod_version=' + v in gradle for v in ('0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0'))
+assert any('mod_version=' + v in gradle for v in ('0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0', '0.9.0'))
 assert 'GLFW_KEY_G' in client and 'GLFW_KEY_H' in client
 assert 'Action.STOP_CHARGE' in client
 assert 'MAX_TICKS = 200' in (src / 'visual/ChargeRules.java').read_text(encoding='utf-8')

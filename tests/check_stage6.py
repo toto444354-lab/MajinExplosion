@@ -16,8 +16,8 @@ profile = (java / 'visual/BlastVisualProfile.java').read_text(encoding='utf-8')
 props = (root / 'gradle.properties').read_text(encoding='utf-8')
 workflow = (root / '.github/workflows/build.yml').read_text(encoding='utf-8')
 
-assert any('mod_version=' + v in props for v in ('0.6.0', '0.7.0', '0.8.0'))
-assert 'BlastVisualProfile.flashAlpha(age)' in renderer
+assert any('mod_version=' + v in props for v in ('0.6.0', '0.7.0', '0.8.0', '0.9.0'))
+assert 'BlastVisualProfile.flashAlpha(blast.spinAge)' in renderer
 assert 'BlastVisualProfile.flashRadius(blast.snapshot.radius(), age)' in renderer
 assert 'BlastVisualProfile.shockRadius(blast.snapshot.radius(), age)' in renderer
 assert 'BlastVisualProfile.shockWidth(shockRadius)' in renderer

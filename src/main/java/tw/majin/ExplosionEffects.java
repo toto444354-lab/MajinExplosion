@@ -23,6 +23,7 @@ import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
 import net.minecraft.network.PacketByteBuf;
 import tw.majin.network.BlastSyncPayload;
 import tw.majin.visual.BlastGeometry;
+import tw.majin.visual.BlastProgress;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
@@ -32,9 +33,10 @@ import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 
 /**
- * Server-authoritative expanding blast. The visual wave and block-carving job are
- * intentionally separate: the former finishes promptly; the latter is bounded
- * and can continue after the caster dies. Never force-load a chunk.
+ * Server-authoritative expanding blast. When terrain destruction is enabled,
+ * visual radius and entity damage are gated by the area already excavated.
+ * This intentionally slows the blast instead of racing ahead of the crater.
+ * No chunk is force-loaded; world edits have strict per-tick limits.
  */
 public final class ExplosionEffects {
     public static final int VISUAL_TICKS = BlastGeometry.DURATION_TICKS;
@@ -72,6 +74,11 @@ public final class ExplosionEffects {
         blast.world.playSound(null, player.getBlockPos(), SoundEvents.ENTITY_GENERIC_EXPLODE,
                 SoundCategory.PLAYERS, 1.8F, 0.7F);
         player.sendMessage(Text.literal("魔人自爆發動！逆時針能量向外擴張，半徑 " + radius + " 格。"), false);
+        if (!config.explosionTerrainEnabled) {
+            player.sendMessage(Text.literal("目前未開啟地形破壞：請關閉遊戲後將 config/majin_explosion.properties 的 explosion_terrain_enabled 改為 true。"), false);
+        } else {
+            player.sendMessage(Text.literal("已啟用地形同步：巨大爆炸會依挖洞進度放慢擴張，僅破壞已載入區塊。"), false);
+        }
         return true;
     }
 
@@ -139,6 +146,7 @@ public final class ExplosionEffects {
         private final TerrainCarver carver;
         private final Set<UUID> damagedEntities = new HashSet<>();
         private int age;
+        private int elapsedTicks;
         private boolean visualFinished;
 
         private Blast(ServerPlayerEntity caster, int radius, double charge, boolean destroyTerrain) {
@@ -158,20 +166,37 @@ public final class ExplosionEffects {
 
         private void tick(MinecraftServer server, AbilityConfig config) {
             if (!visualFinished) {
-                age++;
+                elapsedTicks++;
+                if (carver != null) {
+                    // Preprocess no farther than the next normal wavefront step.
+                    // Even if carving takes many ticks, all visible radii remain
+                    // at or behind the last completely processed radial column.
+                    double nextRadius = BlastGeometry.waveRadius(radius,
+                            Math.min(VISUAL_TICKS, age + 1));
+                    carver.tick(nextRadius, config.maxExplosionBlockRemovalsPerTick);
+                    age = BlastProgress.advance(age, radius, carver.completedRadius(), true);
+                } else {
+                    age = BlastProgress.advance(age, radius, radius, false);
+                }
                 ServerPlayerEntity caster = server.getPlayerManager().getPlayer(casterId);
                 if (caster != null && caster.isAlive() && caster.getServerWorld() == world) {
                     lockCaster(caster);
-                    if (age % 20 == 0) {
+                    if (elapsedTicks % 20 == 0) {
                         caster.sendMessage(Text.literal("自爆擴張：" + (int) Math.floor(currentRadius()) +
                                 " / " + radius + " 格"), true);
                     }
                 }
                 // Nearby vanilla particles are a fallback/accent; the large, continuous
                 // shell is a client-rendered mesh synchronized via a small S2C packet.
-                if (age % 6 == 0) renderCoreAccent();
-                if (age % 20 == 0) broadcastSnapshot();
-                if (age % 4 == 0 && config.explosionDamageEnabled) hitWave(caster);
+                if (elapsedTicks % 6 == 0) renderCoreAccent();
+                if (carver != null) {
+                    // Frequent authoritative snapshots are important when digging
+                    // briefly stalls the advancing energy sphere.
+                    if (elapsedTicks % 4 == 0) broadcastSnapshot();
+                } else {
+                    if (age % 20 == 0) broadcastSnapshot();
+                }
+                if (elapsedTicks % 4 == 0 && config.explosionDamageEnabled) hitVolume(caster);
                 if (age >= VISUAL_TICKS) {
                     visualFinished = true;
                     if (caster != null) {
@@ -188,9 +213,6 @@ public final class ExplosionEffects {
                     world.playSound(null, caster == null ? originalPlayer.getBlockPos() : caster.getBlockPos(),
                             SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 1.1F, 0.55F);
                 }
-            }
-            if (carver != null) {
-                carver.tick(currentRadius(), config.maxExplosionBlockRemovalsPerTick);
             }
         }
 
@@ -229,14 +251,17 @@ public final class ExplosionEffects {
             if (!ServerPlayNetworking.canSend(viewer, BlastSyncPayload.ID)) return;
             PacketByteBuf buf = PacketByteBufs.create();
             BlastSyncPayload.write(buf, new BlastSyncPayload.Snapshot(blastId, world.getRegistryKey().getValue(),
-                    center.x, center.y, center.z, radius, age, (float) charge));
+                    center.x, center.y, center.z, radius, age, (float) charge,
+                    carver != null));
             ServerPlayNetworking.send(viewer, BlastSyncPayload.ID, buf);
         }
 
         /** Small server particles only; large shell is rendered by each client. */
         private void renderCoreAccent() {
-            double phase = BlastGeometry.counterclockwisePhase(age, charge);
-            double coreRadius = 1.4 + 1.5 * Math.sin(age * 0.10) * Math.sin(age * 0.10);
+            // Continue rotating even when terrain processing slows the radius.
+            double phase = BlastGeometry.counterclockwisePhase(elapsedTicks, charge);
+            double coreRadius = Math.min(currentRadius(),
+                    1.4 + 1.5 * Math.sin(elapsedTicks * 0.10) * Math.sin(elapsedTicks * 0.10));
             for (int n = 0; n < 16; n++) {
                 double a = phase + n * (Math.PI * 2.0 / 16.0);
                 world.spawnParticles(n % 3 == 0 ? WHITE : GOLD,
@@ -247,7 +272,8 @@ public final class ExplosionEffects {
                     6, 1.5, 1.5, 1.5, 0.01);
         }
 
-        private void hitWave(ServerPlayerEntity caster) {
+        /** A solid expanding volume: anything inside it is hit ONCE for 9 HP. */
+        private void hitVolume(ServerPlayerEntity caster) {
             double distance = currentRadius();
             double vertical = BlastGeometry.verticalRadius(distance);
             if (distance <= 0.01) return;
@@ -255,11 +281,22 @@ public final class ExplosionEffects {
                     center.x + distance, center.y + vertical, center.z + distance);
             for (LivingEntity entity : world.getEntitiesByClass(LivingEntity.class, bounds,
                     e -> e.isAlive() && !e.getUuid().equals(casterId) && !e.isSpectator())) {
-                Vec3d offset = entity.getPos().add(0.0, entity.getHeight() * 0.5, 0.0).subtract(center);
-                if (!BlastGeometry.inWave(offset.x, offset.y, offset.z, distance)) continue;
-                if (!damagedEntities.add(entity.getUuid())) continue;
-                entity.damage(world.getDamageSources().explosion(null, caster == null ? originalPlayer : caster),
-                        9.0F);
+                Box body = entity.getBoundingBox();
+                // The whole hitbox is tested; being entirely inside the sphere is
+                // sufficient and no thin outer-shell threshold is involved.
+                if (!BlastGeometry.overlapsBox(body.minX - center.x, body.minY - center.y,
+                        body.minZ - center.z, body.maxX - center.x,
+                        body.maxY - center.y, body.maxZ - center.z, distance)) continue;
+                if (damagedEntities.contains(entity.getUuid())) continue;
+                // An entity may have temporary damage immunity from an earlier
+                // charge-shell contact. Retry later if vanilla rejects this hit;
+                // only mark it once a real damage event was accepted.
+                boolean accepted = entity.damage(
+                        world.getDamageSources().explosion(null,
+                                caster == null ? originalPlayer : caster), 9.0F);
+                if (!accepted) continue;
+                damagedEntities.add(entity.getUuid());
+                Vec3d offset = body.getCenter().subtract(center);
                 double length = Math.max(0.01, offset.length());
                 entity.addVelocity(offset.x / length * 1.6, 0.5, offset.z / length * 1.6);
             }
@@ -300,6 +337,22 @@ public final class ExplosionEffects {
         }
 
         boolean isDone() { return current == null && frontier.isEmpty(); }
+
+        /**
+         * Every column closer than this radius is COMPLETELY processed.
+         * Partial columns cannot count as cleared, even if their outer radius
+         * has already been reached. This bounds the visible blast wave.
+         */
+        double completedRadius() {
+            if (isDone()) return radius;
+            int pendingDistanceSquared = Integer.MAX_VALUE;
+            if (current != null) pendingDistanceSquared = current.distanceSquared;
+            if (!frontier.isEmpty()) {
+                pendingDistanceSquared = Math.min(pendingDistanceSquared,
+                        frontier.peek().distanceSquared);
+            }
+            return Math.max(0.0, Math.sqrt(pendingDistanceSquared) - 0.00001);
+        }
 
         void tick(double waveRadius, int maxRemovals) {
             int scans = 0;

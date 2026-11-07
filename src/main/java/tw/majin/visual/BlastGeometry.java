@@ -32,6 +32,27 @@ public final class BlastGeometry {
                 circle * Math.sin(longitude)};
     }
 
+    /**
+     * A creature has volume: its body should be hit as soon as any part of its
+     * bounding box enters the expanding SOLID ellipsoid, not only when its
+     * feet or midpoint touch the thin advancing front.
+     * All coordinates are relative to the explosion centre.
+     */
+    public static boolean overlapsBox(double minX, double minY, double minZ,
+                                      double maxX, double maxY, double maxZ,
+                                      double radius) {
+        double dx = closestToZero(minX, maxX);
+        double dy = closestToZero(minY, maxY);
+        double dz = closestToZero(minZ, maxZ);
+        return inWave(dx, dy, dz, radius);
+    }
+
+    private static double closestToZero(double minimum, double maximum) {
+        if (minimum > 0.0) return minimum;
+        if (maximum < 0.0) return maximum;
+        return 0.0;
+    }
+
     public static boolean inWave(double dx, double dy, double dz, double currentRadius) {
         double scaledY = dy / VERTICAL_SCALE;
         return dx * dx + dz * dz + scaledY * scaledY <= currentRadius * currentRadius;

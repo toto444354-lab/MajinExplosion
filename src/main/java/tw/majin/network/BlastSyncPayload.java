@@ -21,6 +21,7 @@ public final class BlastSyncPayload {
         buf.writeVarInt(snapshot.radius());
         buf.writeVarInt(snapshot.age());
         buf.writeFloat(snapshot.charge());
+        buf.writeBoolean(snapshot.terrainSynced());
     }
 
     public static Snapshot read(PacketByteBuf buf) {
@@ -32,6 +33,7 @@ public final class BlastSyncPayload {
         int radius = buf.readVarInt();
         int age = buf.readVarInt();
         float charge = buf.readFloat();
+        boolean terrainSynced = buf.readBoolean();
         // Reject invalid server data before it reaches a render call.
         if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z) ||
                 Math.abs(x) > 30000000 || Math.abs(z) > 30000000 ||
@@ -40,9 +42,9 @@ public final class BlastSyncPayload {
                 !Float.isFinite(charge) || charge < 0 || charge > 1) {
             throw new IllegalArgumentException("Invalid blast snapshot");
         }
-        return new Snapshot(id, dimension, x, y, z, radius, age, charge);
+        return new Snapshot(id, dimension, x, y, z, radius, age, charge, terrainSynced);
     }
 
     public record Snapshot(UUID id, Identifier dimension, double x, double y, double z,
-                           int radius, int age, float charge) {}
+                           int radius, int age, float charge, boolean terrainSynced) {}
 }

@@ -21,6 +21,7 @@ import org.joml.Matrix4f;
 import tw.majin.network.BlastSyncPayload;
 import tw.majin.network.ChargeSyncPayload;
 import tw.majin.visual.ChargeField;
+import tw.majin.visual.ChargeWind;
 import tw.majin.visual.ChargeRules;
 import tw.majin.visual.BlastGeometry;
 import tw.majin.visual.BlastTimeline;
@@ -94,8 +95,18 @@ public final class BlastSphereRenderer {
         Iterator<ActiveBlast> iterator = BLASTS.values().iterator();
         while (iterator.hasNext()) {
             ActiveBlast blast = iterator.next();
-            blast.age = BlastTimeline.advanceAge(blast.age);
-            if (blast.age >= BlastGeometry.DURATION_TICKS + 2) iterator.remove();
+            blast.spinAge++;
+            blast.ticksSinceUpdate++;
+            if (blast.snapshot.terrainSynced()) {
+                // Never predict the wave ahead of terrain the server has confirmed
+                // fully processed. The ball will pause if excavation is slow.
+                blast.age = BlastTimeline.reconcileAge(blast.age, blast.snapshot.age());
+            } else {
+                blast.age = BlastTimeline.advanceAge(blast.age);
+            }
+            if (blast.ticksSinceUpdate > 120 ||
+                    (!blast.snapshot.terrainSynced() &&
+                            blast.age >= BlastGeometry.DURATION_TICKS + 2)) iterator.remove();
         }
         Iterator<ActiveCharge> chargeIterator = CHARGES.values().iterator();
         while (chargeIterator.hasNext()) {
@@ -119,12 +130,13 @@ public final class BlastSphereRenderer {
         try {
             for (ActiveBlast blast : BLASTS.values()) {
                 double age = Math.min(BlastGeometry.DURATION_TICKS,
-                        blast.age + (double) context.tickDelta());
+                        blast.age + (blast.snapshot.terrainSynced() ? 0.0 : (double) context.tickDelta()));
                 double radius = BlastGeometry.waveRadius(blast.snapshot.radius(), age);
                 if (radius < 0.15 && age > BlastVisualProfile.FLASH_TICKS) continue;
                 Vec3d center = new Vec3d(blast.snapshot.x(), blast.snapshot.y(), blast.snapshot.z());
                 if (center.squaredDistanceTo(camera) > 420.0 * 420.0) continue;
-                double phase = BlastGeometry.counterclockwisePhase(age, blast.snapshot.charge());
+                double phase = BlastGeometry.counterclockwisePhase(
+                        blast.spinAge + (double) context.tickDelta(), blast.snapshot.charge());
                 matrices.push();
                 matrices.translate(center.x - camera.x, center.y - camera.y, center.z - camera.z);
                 Matrix4f transform = matrices.peek().getPositionMatrix();
@@ -133,7 +145,7 @@ public final class BlastSphereRenderer {
                 // Keep every visible layer inside the configured maximum radius.
                 int haloAlpha = BlastVisualProfile.haloAlpha(age);
                 if (haloAlpha > 0) {
-                    shell(transform, Math.min(blast.snapshot.radius(), radius * 1.025),
+                    shell(transform, radius,
                             255, 158, 32, haloAlpha, 0, phase, 0.0);
                 }
                 if (radius >= 0.15) {
@@ -142,7 +154,8 @@ public final class BlastSphereRenderer {
                     shell(transform, radius * 0.955, 255, 250, 207, 20, 50, phase, 0.9);
                     // Three crossing shockfront rings are visible from different angles.
                     // Their six lobes rotate counterclockwise with the blast.
-                    double shockRadius = BlastVisualProfile.shockRadius(blast.snapshot.radius(), age);
+                    double shockRadius = Math.min(radius,
+                            BlastVisualProfile.shockRadius(blast.snapshot.radius(), age));
                     int shockAlpha = BlastVisualProfile.shockAlpha(age);
                     if (shockRadius > 0.25 && shockAlpha > 0) {
                         for (int plane = 0; plane < 3; plane++) {
@@ -153,13 +166,14 @@ public final class BlastSphereRenderer {
                     }
                 }
                 // Bright release flash: a brief physical white pulse, not a full-screen overlay.
-                int flashAlpha = BlastVisualProfile.flashAlpha(age);
+                int flashAlpha = BlastVisualProfile.flashAlpha(blast.spinAge);
                 if (flashAlpha > 0) {
-                    shell(transform, BlastVisualProfile.flashRadius(blast.snapshot.radius(), age),
+                    shell(transform, Math.min(radius,
+                            BlastVisualProfile.flashRadius(blast.snapshot.radius(), age)),
                             255, 255, 247, flashAlpha, 0, phase, 0.0);
                 }
                 // Persistent white-hot center, capped to prevent exceeding the radius.
-                double core = Math.min(blast.snapshot.radius(), Math.min(5.0, 1.5 + radius * 0.035));
+                double core = Math.min(radius, Math.min(5.0, 1.5 + radius * 0.035));
                 shell(transform, core, 255, 255, 230, 70, 20, -age * 0.25, 0.0);
                 matrices.pop();
             }
@@ -282,55 +296,55 @@ public final class BlastSphereRenderer {
     }
 
     /**
-     * Client-side tapered 3D airflow streamlines. A streamlet travels from the
-     * outer suction radius towards the spherical boundary (decreasing radius),
-     * while its angular phase increases clockwise as seen from directly above.
-     * Uses no vanilla fire particles and requires no server particle packets.
+     * Sparse, independent streaks that start in ALL directions around the ball,
+     * then travel almost radially inward to its shell. Golden-angle directions
+     * cover the sphere (not a ring); different phases, speeds and short lengths
+     * prevent the old uniform vortex / horizontal spiral look.
      */
     private static void windRibbons(Matrix4f matrix, double age,
                                     double progress, double phase) {
         Tessellator tessellator = Tessellator.getInstance();
         BufferBuilder builder = tessellator.getBuffer();
         builder.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        final int streams = 32;
-        final int trailSegments = 6;
-        // Pull radius and ball radius are the same constants as the server collider.
-        double speed = 0.018 + 0.015 * progress;
+        final int streams = 88;
         for (int stream = 0; stream < streams; stream++) {
-            // Offset starts so the air currents are distributed around the body.
-            double head = fract(age * speed + stream * 0.61803398875);
-            double base = stream * 2.399963229728653;
-            for (int trail = 0; trail < trailSegments; trail++) {
-                double older = head - (trail + 1) * 0.027;
-                double newer = head - trail * 0.027;
-                if (older < 0.0 || newer > 1.0) continue;
-                Vec3d p0 = windPoint(older, base, phase, stream, progress);
-                Vec3d p1 = windPoint(newer, base, phase, stream, progress);
-                double dx = p1.x - p0.x;
-                double dz = p1.z - p0.z;
-                double planar = Math.hypot(dx, dz);
-                if (planar < 0.0001) continue;
-                double width = 0.042 + progress * 0.052;
-                double sideX = -dz / planar * width;
-                double sideZ = dx / planar * width;
-                int alphaTail = Math.max(1, (int) ((18 + 54 * progress) * older));
-                int alphaHead = Math.max(1, (int) ((25 + 90 * progress) * newer));
-                windVertex(builder, matrix, p0, sideX, sideZ, 255, 241, 174, alphaTail);
-                windVertex(builder, matrix, p0, -sideX, -sideZ, 255, 241, 174, alphaTail);
-                windVertex(builder, matrix, p1, -sideX, -sideZ, 255, 250, 209, alphaHead);
-                windVertex(builder, matrix, p1, sideX, sideZ, 255, 250, 209, alphaHead);
+            double seed = fract((stream + 1) * 0.61803398875);
+            double speed = 0.018 + 0.018 * fract(stream * 0.41421356237);
+            double head = fract(age * speed * (1.0 + 0.25 * progress) + seed);
+            // Each line is only 2–4 small segments, not a continuous coil.
+            int segments = 2 + (stream % 3);
+            double trailStep = 0.012 + 0.006 * fract(stream * 0.7548776662);
+            for (int segment = 0; segment < segments; segment++) {
+                double from = head - (segment + 1) * trailStep;
+                double to = head - segment * trailStep;
+                if (from <= 0.0 || to >= 1.0) continue;
+                Vec3d p0 = windPoint(from, stream, streams, progress, phase);
+                Vec3d p1 = windPoint(to, stream, streams, progress, phase);
+                Vec3d tangent = p1.subtract(p0);
+                Vec3d lateral = new Vec3d(-tangent.z, 0.0, tangent.x);
+                if (lateral.lengthSquared() < 0.000001) lateral = new Vec3d(1, 0, 0);
+                lateral = lateral.normalize().multiply(0.019 + 0.029 * progress);
+                // Fade toward both ends, creating individual wisps in open air.
+                int alpha0 = windAlpha(from, progress);
+                int alpha1 = windAlpha(to, progress);
+                windVertex(builder, matrix, p0, lateral.x, lateral.z, 225, 237, 239, alpha0);
+                windVertex(builder, matrix, p0, -lateral.x, -lateral.z, 225, 237, 239, alpha0);
+                windVertex(builder, matrix, p1, -lateral.x, -lateral.z, 255, 250, 204, alpha1);
+                windVertex(builder, matrix, p1, lateral.x, lateral.z, 255, 250, 204, alpha1);
             }
         }
         tessellator.draw();
     }
 
-    private static Vec3d windPoint(double inwards, double base, double phase,
-                                   int stream, double progress) {
-        // inwards increases with time and pulls this streak onto the sphere.
-        double radius = ChargeField.windRadius(progress, inwards);
-        double angle = base + phase + inwards * (0.7 + 0.8 * progress);
-        double rise = Math.sin(stream * 2.15 + inwards * 5.0) * (0.65 + progress * 1.1);
-        return new Vec3d(Math.cos(angle) * radius, rise, Math.sin(angle) * radius);
+    private static int windAlpha(double inward, double progress) {
+        double fade = Math.sin(Math.PI * inward);
+        return Math.max(0, (int) Math.round((18.0 + 52.0 * progress) * fade * fade));
+    }
+
+    private static Vec3d windPoint(double inward, int index, int count,
+                                   double progress, double phase) {
+        double[] p = ChargeWind.point(inward, index, count, progress, phase);
+        return new Vec3d(p[0], p[1], p[2]);
     }
 
     private static double fract(double x) {
@@ -378,12 +392,16 @@ public final class BlastSphereRenderer {
     private static final class ActiveBlast {
         private BlastSyncPayload.Snapshot snapshot;
         private int age;
+        private int spinAge;
+        private int ticksSinceUpdate;
         private ActiveBlast(BlastSyncPayload.Snapshot snapshot) {
             this.snapshot = snapshot;
             this.age = snapshot.age();
+            this.spinAge = snapshot.age();
         }
         private void update(BlastSyncPayload.Snapshot incoming) {
             age = BlastTimeline.reconcileAge(age, incoming.age());
+            ticksSinceUpdate = 0;
             snapshot = incoming;
         }
     }

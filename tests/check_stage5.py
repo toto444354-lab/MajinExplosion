@@ -15,7 +15,7 @@ snapshot = (java / 'network/BlastSyncPayload.java').read_text(encoding='utf-8')
 geometry = (java / 'visual/BlastGeometry.java').read_text(encoding='utf-8')
 metadata = json.loads((root / 'src/main/resources/fabric.mod.json').read_text())
 assert metadata['id'] == 'majin_explosion'
-assert any('mod_version=' + v in (root / 'gradle.properties').read_text() for v in ('0.5.0', '0.6.0', '0.7.0', '0.8.0'))
+assert any('mod_version=' + v in (root / 'gradle.properties').read_text() for v in ('0.5.0', '0.6.0', '0.7.0', '0.8.0', '0.9.0'))
 assert "version '1.6.12'" in (root / 'build.gradle').read_text()
 assert 'BlastSphereRenderer.register()' in client
 assert 'ClientPlayNetworking.registerGlobalReceiver(BlastSyncPayload.ID' in client

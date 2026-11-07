@@ -13,14 +13,14 @@ config = (java / 'AbilityConfig.java').read_text(encoding='utf-8')
 modsrc = (java / 'MajinExplosionMod.java').read_text(encoding='utf-8')
 props = (ROOT / 'gradle.properties').read_text(encoding='utf-8')
 meta = json.loads((ROOT / 'src/main/resources/fabric.mod.json').read_text(encoding='utf-8'))
-assert any('mod_version=' + v in props for v in ('0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0'))
+assert any('mod_version=' + v in props for v in ('0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0', '0.9.0'))
 assert meta['id'] == 'majin_explosion'
 assert meta['depends']['minecraft'] == '1.20.1'
 assert 'ExplosionEffects.start(player, state.ticks, config)' in controller
 assert 'ExplosionEffects.tick(server, config)' in controller
 assert 'MAX_RADIUS = BlastGeometry.MAX_RADIUS' in blast
 assert 'VISUAL_TICKS = BlastGeometry.DURATION_TICKS' in blast
-assert 'BlastGeometry.counterclockwisePhase(age, charge)' in blast, 'Counterclockwise phase must decrease'
+assert 'BlastGeometry.counterclockwisePhase(elapsedTicks, charge)' in blast, 'Counterclockwise phase must decrease'
 assert 'new DustParticleEffect' in blast and 'ParticleTypes.END_ROD' in blast
 assert 'caster.requestTeleport(anchor.x, anchor.y, anchor.z)' in blast
 assert 'caster.setVelocity(Vec3d.ZERO)' in blast
