@@ -1,82 +1,54 @@
-# 魔人自爆（Majin Explosion）— 第十階段 v0.10.0
+# 魔人自爆（Majin Explosion）— 第十一階段 v0.11.0
 
-**Minecraft Java 1.20.1 / Fabric / Java 17** 的模組原始碼。
-這份 ZIP **不是**可直接放進 `mods` 的 JAR；需要在 GitHub Actions 建置。
+Minecraft Java **1.20.1** / Fabric / Java 17 原始碼。**這不是可直接安裝的 JAR**；上傳 GitHub 後需透過 Actions 編譯。第十一階段針對大型地形破壞的性能及功能方塊遺留進行修正。
 
-本版依照實測回饋修正了爆炸持續傷害、三維橢圓坑洞與效能，同時新增蒸發水、爆炸後煙霧、創造模式死亡開關與**沿擴張邊緣向外上方噴起的砂石煙塵**。
+## 本版修正
 
-## 實際行為
+- **箱子、熔爐、漏斗等功能方塊可以被爆炸消除**：舊版有 `!state.hasBlockEntity()`，會跳過所有帶方塊實體的方塊；本版已移除該限制。一般工作台等功能方塊也會按照可破壞性判定。
+- **避免容器掉落大量物品**：刪除帶方塊實體的容器前清空 `Inventory`，並使用 `Block.SKIP_DROPS`；這表示**箱子裡的物品也會被永久消除**。不可還原，必須在備份測試世界使用。其他模組的特殊方塊如有自己的額外掉落回呼，仍可能需要相容性修正。
+- **保留不可破壞方塊**：硬度為負的基岩、終界傳送門框、指令方塊等仍保留；也遵守 `canPlayerModifyAt` 檢查。蓄力時吸起方塊的功能仍不支援帶方塊實體的容器，本版修改針對**爆炸挖洞**。
+- **減少排序負擔**：爆炸的三維橢圓方塊掃描，從「每方塊優先佇列」改為整數半徑分層的 `RadiusBucketQueue`，維持由中心往外的挖洞順序，不再對大量方塊做二元堆排序。
+- **跳過空區塊段**：一次略過已載入區塊內的全空 16 格高度區段，不必逐格查詢。
+- **限制單 tick 負荷**：除每 tick 最多方塊數外，新增單次地形處理時間預算、功能方塊移除上限 32 個／次，避免嚴重卡頓；最多仍允許 2 場同時爆炸。這是降低尖峰負載，不代表能在 6 秒挖完 200 格地形。
+- **視覺範圍與挖洞範圍可分離**：保留最大 200 格爆炸光球與範圍傷害，但地形破壞半徑預設上限縮為 96 格，以便日常測試；可自行改為 200 格完整坑洞（處理時間與負載會顯著增加）。地形啟用時，光球仍依地形挖掘進度限制擴張，不會直接跑過未處理區域。
+- **保留之前功能**：G 蓄力鎖定、放開取消；黃色網格球與風流；撞到蓄力球每秒 1 HP；爆炸範圍內每秒 9 HP；橢圓坑洞、水蒸發、邊緣砂石煙霧、爆炸後殘煙、創造模式死亡開關。
 
-| 功能 | 本版內容 |
-|---|---|
-| G 蓄力 | 按住 G、玩家不能移動；放開取消，蓄力清零；滿 10 秒仍持續吸力；H 在按住 G 時釋放 |
-| 黃色能量球 | 3D 客戶端球面，非火焰粒子；吸入風流由四面八方接近球體 |
-| 接觸傷害 | 生物被吸往球面，途中無傷害，碰到球面每秒 1 HP |
-| 爆炸傷害 | **整個擴張的橢圓體積內**每秒嘗試對生物造成 **9 HP**，不再只在外圈命中一次（仍受 Minecraft 原生無敵幀等限制） |
-| 形狀 | 按單一方塊的「三維橢圓到達距離」排序挖除，避免先挖到底的圓柱牆；中心深、邊緣淺 |
-| 速度 | 理想視覺展開時間調整至 **120 ticks = 約 6 秒**。啟用同步地形時，實際可能比 6 秒長很多，以避免卡服 |
-| 水 | 選項 `explosion_evaporates_water`：爆炸清除水源、流水與含水方塊；周圍水可能照原版機制再次流入 |
-| **砂石噴射** | **新功能**：每 2 ticks 在當前爆炸邊界發射分散在 360° 的方塊碎片與灰褐色煙塵。碎石沿半徑向外、同時向上拋，灰塵較慢地往外擴散。靠近地表發生，並隨光球同步向外移動 |
-| 爆炸殘煙 | 爆炸完成後，在已載入的坑洞範圍持續分散冒煙，預設 20 秒漸淡 |
-| 創造模式 | `creative_caster_death_enabled=false` 時不會因自己的自爆死亡；生存模式仍會死亡 |
+## 設定方式
 
-### 如何開啟地形破壞（非常重要）
-
-先關閉 Minecraft，按 `Win + R` 輸入：
-
-```text
-%appdata%\.minecraft\config\majin_explosion.properties
-```
-
-找到下列設定，修改後存檔並重開 Minecraft：
+關閉 Minecraft，開啟 `%appdata%\.minecraft\config\majin_explosion.properties`，修改後儲存並重啟遊戲：
 
 ```properties
-terrain_absorption_enabled=true
+# 開啟爆炸破壞（目前仍預設 false，避免誤炸存檔）
 explosion_terrain_enabled=true
-explosion_evaporates_water=true
-explosion_rim_debris_enabled=true
-rim_debris_particles_per_burst=18
-rim_smoke_particles_per_burst=14
-residual_smoke_enabled=true
-residual_smoke_seconds=20
-smoke_particles_per_tick=12
-creative_caster_death_enabled=false
+# 每 tick 上限：建議從 2048～4096 開始測試，能接受卡頓再提高
 max_explosion_block_removals_per_tick=4096
+# 每次地形處理最多使用約 6000 微秒 (= 6 毫秒)；保護伺服器單 tick
+explosion_carve_micros_per_tick=6000
+# 爆炸球最大 200，地形破壞半徑預設 96，必要時可調整至 200
+max_explosion_terrain_radius=96
+# 水蒸發、殘煙、創造模式免死
+explosion_evaporates_water=true
+residual_smoke_enabled=true
+creative_caster_death_enabled=false
 ```
 
-- `terrain_absorption_enabled` 控制蓄力吸起方塊；`explosion_terrain_enabled` 才控制爆炸挖洞。
-- **新的邊緣砂石噴射只會在爆炸地形破壞開啟時出現**；若地形破壞關閉，只有能量球、傷害等效果。
-- **本版會把缺少的「新設定」補進既有 properties，並保留舊設定值**。如果原先地形破壞是 `false`，更新 JAR 後也仍會是 `false`，請自行改為 `true`。
-- `rim_debris_particles_per_burst`、`rim_smoke_particles_per_burst` 各自限制在 **0–48**，每兩 ticks 至多各生成一次指定數量，沒有新增常駐方塊實體。若 FPS / 網路吃緊，先降成 8 和 6，或設定 `explosion_rim_debris_enabled=false`。
-- `max_explosion_block_removals_per_tick` 限制在 **64–8192**；提高會加速挖洞但也提高瞬間負載，必須自行測 TPS。
-- 煙霧、蒸發與死亡選項修改後同樣要重新啟動世界／伺服器。
+注意：**已存在的設定檔會保留舊數值**，新版只會補上缺少的設定。即使新 JAR 上線，舊的 `explosion_terrain_enabled=false` 仍需手動改成 `true`。
 
-## 推薦第一次測試
+效能取捨：如果實測仍很慢，可先把 `max_explosion_terrain_radius` 降到 `48` 或 `64`。**全尺寸 200 格地形包含數百萬個體素，沒有能在所有電腦上安全地瞬間刪光的方法。** 本版本優先讓伺服器保持可回應；在大型建築或大量容器區域，實際速度仍可能明顯降低。
 
-1. **先備份世界**，在全新測試世界測，不要使用主存檔。
-2. 在 GitHub Actions 編譯第十階段，確認真正產生 `majin-explosion-0.10.0.jar`。
-3. 關閉遊戲，從 `mods` 移除先前的 0.8/0.9 JAR，只保留新 JAR 和 Fabric API。
-4. 確認新設定檔中的 `explosion_terrain_enabled=true`，重開遊戲。
-5. 在平坦地面按住 G 約 **0.5–1 秒**，按住 G 時按 H。先看小半徑的橢圓坑洞、往外拋出的碎石煙塵、範圍內每秒 9 HP、清水及 20 秒殘煙。
-6. 再逐步測試 2、3、5 秒蓄力。**不要一開始就測滿蓄力 200 格**：那可能涉及大量方塊及未載入區塊。
-7. 創造模式免死亡開關預設為 `false`，可在測試世界中安全反覆施放；改成 `true` 後重新進世界測試死亡效果。
+## 建置和測試
 
-## 技術限制／效果逼近程度
+1. 先備份世界，**請勿直接在主存檔測試**。關閉 Minecraft。
+2. 將這個 ZIP 內的 `src`、`tests`、`gradle.properties`、`build.gradle` 等更新到之前的 GitHub 專案根目錄，**保留已經正常運作的 `.github/workflows/main.yml`**。如果也要上傳本 ZIP 的 `.github/workflows/build.yml`，會額外建立一個編譯工作流程，不是必需。
+3. 儲存（Commit）後打開 GitHub Actions，確認 `Fabric 1.20.1 build` 綠色勾勾。下載 Artifacts 解壓後，只取不帶 `-sources` 的 `majin-explosion-0.11.0.jar`。
+4. 移除 mods 內舊版同名 JAR，只保留新版與 Fabric API。
+5. 在新測試世界試 0.5 秒、1 秒、2 秒蓄力：建造裝了物品的箱子、熔爐、漏斗，確認新爆炸波掃過後方塊消失且不產生大量掉落物。**其中物品會永久消失**。
+6. 再測試 3 秒以上蓄力，觀察 TPS 與延遲；不要一開始就滿 10 秒釋放 200 格爆炸。
 
-- **砂石噴射是有速度的原版方塊粒子、塵粒和煙霧**，不是完整擬真流體或圖片中大型體積煙塵模型。會從爆炸邊界「向外且向上」飛散，能呈現砂石被衝擊波掀起的方向感，但雲團大小與遮蔽效果仍須實際遊戲調整。
-- 只在**已載入**的區塊刪除方塊；基岩、無法破壞方塊、帶方塊實體的方塊及無建造權限區域跳過；不保證半徑 200 格的整個範圍每格都完整挖除。
-- 當啟用地形同步時，光球不能超前已完成的挖除進度。如果世界較慢，視覺展開會超過 6 秒；這是穩定性限制，不是已解決的效能瓶頸。
-- 消除水不代表永久禁止水回填。爆炸周邊的水仍可依原版規則重新流入坑洞。
-- **本環境僅完成原始碼靜態檢查和獨立 Java 數學測試；尚未執行完整 Gradle/Fabric 編譯及遊戲實測。** GitHub Actions 成功與遊戲實測後才能視為可用版本。
-
-## 編譯方法
-
-將 ZIP **內部**的 `src/`、`tests/`、`build.gradle`、`gradle.properties` 等更新到 GitHub 儲存庫根目錄，保留既有能工作的 `.github/workflows/main.yml`。上傳後 Commit，等待 `Fabric 1.20.1 build` 顯示綠勾，下載 Artifacts ZIP，解壓後只把**不是 `-sources.jar`** 的 0.10.0 JAR 放入 `mods`。
-
-離線檢查可執行：
+### 離線驗證
 
 ```bash
-python tests/check_stage10.py
+python tests/check_stage11.py
 ```
 
-此指令會使用 `javac --release 17` 編譯並執行爆炸半徑、橢圓挖洞、持續傷害節奏、砂石放射軌跡、殘煙與創造模式死亡選項的純 Java 測試，不等於 Minecraft 實際相容性驗證。
+此腳本會用 Java 17 編譯、執行 `RadiusBucketQueue`、三維橢圓、爆炸傷害節奏等純 Java 測試，並執行原始碼檢查。這**不能替代 Fabric/Gradle 編譯或實際遊戲測試**。

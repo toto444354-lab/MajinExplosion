@@ -1,20 +1,20 @@
 package tw.majin;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Iterator;
 import java.util.List;
-import java.util.PriorityQueue;
 import java.util.Set;
 import net.minecraft.registry.tag.FluidTags;
 import java.util.UUID;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.particle.DustParticleEffect;
 import net.minecraft.particle.BlockStateParticleEffect;
@@ -34,6 +34,9 @@ import tw.majin.visual.BlastDamageGate;
 import tw.majin.visual.CasterDeathRule;
 import tw.majin.visual.ResidualSmokePattern;
 import tw.majin.visual.BlastRimSpray;
+import tw.majin.visual.RadiusBucketQueue;
+import net.minecraft.world.chunk.ChunkSection;
+import net.minecraft.world.chunk.WorldChunk;
 import net.minecraft.world.Heightmap;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -53,8 +56,9 @@ public final class ExplosionEffects {
     public static final int VISUAL_TICKS = BlastGeometry.DURATION_TICKS;
     public static final int MAX_RADIUS = BlastGeometry.MAX_RADIUS;
     private static final int MAX_SIMULTANEOUS_JOBS = 2;
-    private static final int MAX_BLOCK_SCANS_PER_JOB_TICK = 32768;
-    private static final int MAX_COLUMNS_PER_JOB_TICK = 4096;
+    private static final int MAX_BLOCK_SCANS_PER_JOB_TICK = 65536;
+    private static final int MAX_COLUMNS_PER_JOB_TICK = 8192;
+    private static final int MAX_BLOCK_ENTITY_REMOVALS_PER_JOB_TICK = 32;
     private static final int CARVE_LOOKAHEAD_TICKS = 16;
     private static final List<Blast> BLASTS = new ArrayList<>();
     private static final List<SmokeCloud> SMOKE_CLOUDS = new ArrayList<>();
@@ -83,7 +87,7 @@ public final class ExplosionEffects {
         }
         double charge = Math.min(1.0, chargeTicks / 200.0);
         int radius = Math.max(2, (int) Math.ceil(MAX_RADIUS * charge));
-        Blast blast = new Blast(player, radius, charge, config.explosionTerrainEnabled);
+        Blast blast = new Blast(player, radius, charge, config);
         BLASTS.add(blast);
         blast.broadcastSnapshot();
         // One server-side sound event reaches nearby players without extra packets.
@@ -173,7 +177,7 @@ public final class ExplosionEffects {
         private long rimSample;
         private double lastSprayedRadius = -1.0;
 
-        private Blast(ServerPlayerEntity caster, int radius, double charge, boolean destroyTerrain) {
+        private Blast(ServerPlayerEntity caster, int radius, double charge, AbilityConfig config) {
             this.casterId = caster.getUuid();
             this.world = caster.getServerWorld();
             this.anchor = caster.getPos();
@@ -186,7 +190,12 @@ public final class ExplosionEffects {
             this.charge = charge;
             int down = Math.max(3, (int) Math.ceil(56.0 * charge));
             int up = Math.max(2, (int) Math.ceil(35.0 * charge));
-            this.carver = destroyTerrain ? new TerrainCarver(world, caster, center, radius, down, up) : null;
+            int carveRadius = Math.min(radius, config.maxExplosionTerrainRadius);
+            double scale = carveRadius / (double) radius;
+            this.carver = config.explosionTerrainEnabled
+                    ? new TerrainCarver(world, caster, center, carveRadius,
+                            Math.max(1, (int) Math.ceil(down * scale)),
+                            Math.max(1, (int) Math.ceil(up * scale))) : null;
         }
 
         private void tick(MinecraftServer server, AbilityConfig config) {
@@ -197,10 +206,12 @@ public final class ExplosionEffects {
                     // shell cannot overtake completed 3D ellipsoid cells.
                     double plannedRadius = BlastGeometry.waveRadius(radius,
                             Math.min(VISUAL_TICKS, elapsedTicks + CARVE_LOOKAHEAD_TICKS));
-                    carver.tick(plannedRadius, config.maxExplosionBlockRemovalsPerTick,
-                            config.explosionEvaporatesWater);
+                    double terrainScale = carver.radius / (double) radius;
+                    carver.tick(plannedRadius * terrainScale,
+                            config.maxExplosionBlockRemovalsPerTick,
+                            config.explosionEvaporatesWater, config.explosionCarveMicrosPerTick);
                     age = BlastProgress.advanceToward(age, elapsedTicks, radius,
-                            carver.completedRadius(), true);
+                            carver.completedRadius() / terrainScale, true);
                 } else {
                     age = BlastProgress.advanceToward(age, elapsedTicks, radius, radius, false);
                 }
@@ -261,8 +272,8 @@ public final class ExplosionEffects {
                 }
             } else if (carver != null && !carver.isDone()) {
                 // Finish rounding/boundary cells even after the shell is gone.
-                carver.tick(radius, config.maxExplosionBlockRemovalsPerTick,
-                        config.explosionEvaporatesWater);
+                carver.tick(carver.radius, config.maxExplosionBlockRemovalsPerTick,
+                        config.explosionEvaporatesWater, config.explosionCarveMicrosPerTick);
             }
         }
 
@@ -419,13 +430,13 @@ public final class ExplosionEffects {
     }
 
     /**
-     * Priority-ordered 3D ellipsoid excavation.
+     * Radius-bucket 3D ellipsoid excavation. Previous versions used large
+     * PriorityQueues and re-sorted virtually every voxel. Integer radius
+     * shells have O(1) enqueue/dequeue and remain monotonic, so the sphere
+     * never advances past unprocessed ground. No asynchronous world mutation.
      *
-     * The old algorithm emptied whole columns at their final depth, making a
-     * cylinder with vertical walls while the wave was growing. This algorithm
-     * orders each BLOCK by its ellipsoidal arrival distance: first near the
-     * centre, then upward/downward and outward as the shell expands. Horizontal
-     * seeds are generated lazily; all updates remain on the server tick thread.
+     * An optional time budget limits per-tick stutter; only loaded chunks are
+     * touched. Empty 16-block chunk sections can be skipped in one operation.
      */
     static final class TerrainCarver {
         private final ServerWorld world;
@@ -434,11 +445,8 @@ public final class ExplosionEffects {
         private final int radius;
         private final int down;
         private final int up;
-        private final PriorityQueue<HorizontalSeed> frontier =
-                new PriorityQueue<>(Comparator.comparingInt(c -> c.distanceSquared));
-        private final PriorityQueue<VerticalCursor> cells =
-                new PriorityQueue<>(Comparator.comparingDouble(c -> c.nextDistanceSquared));
-        private VerticalCursor current;
+        private final RadiusBucketQueue<Object> jobs;
+        private final BlockPos.Mutable position = new BlockPos.Mutable();
 
         TerrainCarver(ServerWorld world, ServerPlayerEntity owner, Vec3d center,
                       int radius, int down, int up) {
@@ -448,105 +456,136 @@ public final class ExplosionEffects {
             this.radius = radius;
             this.down = down;
             this.up = up;
+            this.jobs = new RadiusBucketQueue<>(radius);
             for (int dz = -radius; dz <= radius; dz++) {
                 int maxX = (int) Math.floor(Math.sqrt((double) radius * radius - dz * dz));
-                frontier.add(new HorizontalSeed(0, dz, +1, maxX));
-                if (maxX >= 1) frontier.add(new HorizontalSeed(-1, dz, -1, maxX));
+                offerSeed(new HorizontalSeed(0, dz, +1, maxX));
+                if (maxX >= 1) offerSeed(new HorizontalSeed(-1, dz, -1, maxX));
             }
         }
 
-        boolean isDone() { return current == null && frontier.isEmpty() && cells.isEmpty(); }
+        boolean isDone() { return jobs.isEmpty(); }
 
-        /** Lower bound of all pending voxel arrival radii, not just column radii. */
+        /** Conservative completed radius, based on the first unprocessed shell. */
         double completedRadius() {
-            if (isDone()) return radius;
-            double next = Double.POSITIVE_INFINITY;
-            if (current != null) next = Math.min(next, current.nextDistanceSquared);
-            if (!frontier.isEmpty()) next = Math.min(next, frontier.peek().distanceSquared);
-            if (!cells.isEmpty()) next = Math.min(next, cells.peek().nextDistanceSquared);
-            return Math.max(0.0, Math.min(radius, Math.sqrt(next) - 1.0e-6));
+            return isDone() ? radius : Math.max(0, Math.min(radius, jobs.firstShell() - 1));
         }
 
-        void tick(double targetRadius, int maxRemovals, boolean evaporateWater) {
+        void tick(double targetRadius, int maxRemovals,
+                  boolean evaporateWater, int microsBudget) {
             int scans = 0;
             int removals = 0;
             int columns = 0;
+            int operations = 0;
             int vaporParticles = 0;
-            double limitSquared = Math.min(radius, targetRadius) * Math.min(radius, targetRadius);
+            int blockEntityRemovals = 0;
+            // Process only full integer shells; preserves strictly synchronized
+            // visuals with a conservative <=1-block rounding error.
+            int limit = (int) Math.floor(Math.max(0, Math.min(radius, targetRadius)));
+            long deadline = System.nanoTime() + microsBudget * 1000L;
             while (scans < MAX_BLOCK_SCANS_PER_JOB_TICK &&
-                    removals < maxRemovals && columns < MAX_COLUMNS_PER_JOB_TICK) {
-                if (current == null) {
-                    double firstSeed = frontier.isEmpty() ? Double.POSITIVE_INFINITY
-                            : frontier.peek().distanceSquared;
-                    double firstCell = cells.isEmpty() ? Double.POSITIVE_INFINITY
-                            : cells.peek().nextDistanceSquared;
-                    if (Math.min(firstSeed, firstCell) > limitSquared + 1.0e-8) break;
-                    if (firstSeed <= firstCell) {
-                        openColumn(frontier.poll());
-                        columns++;
-                        continue;
-                    }
-                    current = cells.poll();
-                }
-                int x = (int) Math.floor(center.x) + current.dx;
-                int z = (int) Math.floor(center.z) + current.dz;
-                if (!world.isChunkLoaded(x >> 4, z >> 4)) {
-                    current = null;
+                    removals < maxRemovals && columns < MAX_COLUMNS_PER_JOB_TICK &&
+                    !jobs.isEmpty() && jobs.firstShell() <= limit) {
+                // Amortize clock lookups; control how long terrain can stall a tick.
+                if ((++operations & 63) == 0 && System.nanoTime() >= deadline) break;
+                Object entry = jobs.poll();
+                if (entry instanceof HorizontalSeed seed) {
+                    openColumn(seed);
+                    columns++;
                     continue;
                 }
-                while (current != null && current.valid()
-                        && current.nextDistanceSquared <= limitSquared + 1.0e-8
-                        && scans < MAX_BLOCK_SCANS_PER_JOB_TICK && removals < maxRemovals) {
-                    BlockPos pos = new BlockPos(x, current.y, z);
-                    scans++;
-                    BlockState state = world.getBlockState(pos);
-                    boolean isWater = state.getFluidState().isIn(FluidTags.WATER);
-                    if (!state.isAir() && !state.hasBlockEntity()
-                            && state.getHardness(world, pos) >= 0.0F
-                            && world.canPlayerModifyAt(owner, pos)
-                            && (!isWater || evaporateWater)
-                            && world.setBlockState(pos, Blocks.AIR.getDefaultState(),
-                                    Block.NOTIFY_LISTENERS | Block.SKIP_DROPS |
-                                            (isWater ? Block.FORCE_STATE : 0))) {
-                        removals++;
-                        // Water sources, flows and waterlogged blocks are removed.
-                        // A tiny capped burst suggests instant evaporation.
-                        if (isWater && vaporParticles++ < 12) {
-                            world.spawnParticles(ParticleTypes.CLOUD,
-                                    x + 0.5, current.y + 0.6, z + 0.5,
-                                    1, 0.12, 0.12, 0.12, 0.01);
+                VerticalCursor cursor = (VerticalCursor) entry;
+                int x = (int) Math.floor(center.x) + cursor.dx;
+                int z = (int) Math.floor(center.z) + cursor.dz;
+                // One chunk-loaded check per cursor per world tick, not per voxel.
+                if (cursor.checkedWorldTick != world.getTime()) {
+                    cursor.checkedWorldTick = world.getTime();
+                    cursor.chunkLoaded = world.isChunkLoaded(x >> 4, z >> 4);
+                }
+                if (!cursor.chunkLoaded) continue;
+
+                int sectionY = cursor.y >> 4;
+                if (cursor.checkedSectionY != sectionY) {
+                    cursor.checkedSectionY = sectionY;
+                    WorldChunk chunk = world.getChunk(x >> 4, z >> 4);
+                    ChunkSection section = chunk.getSection(world.getSectionIndex(cursor.y));
+                    cursor.sectionEmpty = section.isEmpty();
+                }
+                if (cursor.sectionEmpty) {
+                    cursor.skipEmptySection();
+                    offerCursor(cursor);
+                    continue;
+                }
+
+                position.set(x, cursor.y, z);
+                scans++;
+                BlockState state = world.getBlockState(position);
+                if (!state.isAir() && state.getHardness(world, position) >= 0.0F &&
+                        world.canPlayerModifyAt(owner, position)) {
+                    boolean water = state.getFluidState().isIn(FluidTags.WATER);
+                    if (!water || evaporateWater) {
+                        boolean hasBlockEntity = state.hasBlockEntity();
+                        if (hasBlockEntity && blockEntityRemovals >= MAX_BLOCK_ENTITY_REMOVALS_PER_JOB_TICK) {
+                            // Do not skip the block; retry this voxel next tick so the
+                            // ellipsoid wave never advances past an intact container.
+                            offerCursor(cursor);
+                            break;
+                        }
+                        if (hasBlockEntity) {
+                            // Vanilla container callbacks may scatter their inventories.
+                            // Empty inventories before removal, in addition to SKIP_DROPS,
+                            // to avoid thousands of item entities from an exploding base.
+                            BlockEntity tile = world.getBlockEntity(position);
+                            if (tile instanceof Inventory inventory) inventory.clear();
+                        }
+                        if (world.setBlockState(position, Blocks.AIR.getDefaultState(),
+                                Block.NOTIFY_LISTENERS | Block.SKIP_DROPS |
+                                        (water ? Block.FORCE_STATE : 0))) {
+                            removals++;
+                            if (hasBlockEntity) blockEntityRemovals++;
+                            if (water && vaporParticles++ < 12) {
+                                world.spawnParticles(ParticleTypes.CLOUD,
+                                        x + 0.5, cursor.y + 0.6, z + 0.5,
+                                        1, 0.12, 0.12, 0.12, 0.01);
+                            }
                         }
                     }
-                    current.step();
                 }
-                if (current != null) {
-                    if (current.valid()) cells.add(current);
-                    current = null;
-                }
+                cursor.step();
+                offerCursor(cursor);
+            }
+        }
+
+        private void offerSeed(HorizontalSeed seed) {
+            jobs.add(RadiusBucketQueue.shellFor(seed.distanceSquared), seed);
+        }
+
+        private void offerCursor(VerticalCursor cursor) {
+            if (cursor.valid()) {
+                jobs.add(RadiusBucketQueue.shellFor(cursor.nextDistanceSquared), cursor);
             }
         }
 
         private void openColumn(HorizontalSeed seed) {
             int nextX = seed.dx + seed.direction;
             if (Math.abs(nextX) <= seed.maxX) {
-                frontier.add(new HorizontalSeed(nextX, seed.dz, seed.direction, seed.maxX));
+                offerSeed(new HorizontalSeed(nextX, seed.dz, seed.direction, seed.maxX));
             }
             int x = (int) Math.floor(center.x) + seed.dx;
             int z = (int) Math.floor(center.z) + seed.dz;
             if (!world.isChunkLoaded(x >> 4, z >> 4)) return;
 
-            // Avoid scanning dozens of AIR blocks above natural ground.
-            int highestSolid = world.getTopY(Heightmap.Type.WORLD_SURFACE, x, z) - 1;
+            int top = world.getTopY(Heightmap.Type.WORLD_SURFACE, x, z) - 1;
             int low = Math.max(world.getBottomY(),
                     BlastCrater.lowestY(seed.dx, seed.dz, center.y, radius, down));
-            int high = Math.min(Math.min(world.getTopY() - 1, highestSolid),
+            int high = Math.min(Math.min(world.getTopY() - 1, top),
                     BlastCrater.highestY(seed.dx, seed.dz, center.y, radius, up));
             if (low > high) return;
             int middle = (int) Math.floor(center.y - 0.5);
             int below = Math.min(middle, high);
-            if (below >= low) cells.add(new VerticalCursor(seed.dx, seed.dz, below, low, -1));
+            if (below >= low) offerCursor(new VerticalCursor(seed.dx, seed.dz, below, low, -1));
             int above = Math.max(middle + 1, low);
-            if (above <= high) cells.add(new VerticalCursor(seed.dx, seed.dz, above, high, +1));
+            if (above <= high) offerCursor(new VerticalCursor(seed.dx, seed.dz, above, high, +1));
         }
 
         private final class VerticalCursor {
@@ -556,6 +595,10 @@ public final class ExplosionEffects {
             final int direction;
             int y;
             double nextDistanceSquared;
+            long checkedWorldTick = Long.MIN_VALUE;
+            boolean chunkLoaded;
+            int checkedSectionY = Integer.MIN_VALUE;
+            boolean sectionEmpty;
 
             VerticalCursor(int dx, int dz, int y, int endY, int direction) {
                 this.dx = dx;
@@ -568,6 +611,12 @@ public final class ExplosionEffects {
 
             boolean valid() { return direction > 0 ? y <= endY : y >= endY; }
             void step() { y += direction; refreshDistance(); }
+            void skipEmptySection() {
+                int sectionBaseY = y & ~15;
+                y = direction > 0 ? Math.min(endY + 1, sectionBaseY + 16)
+                        : Math.max(endY - 1, sectionBaseY - 1);
+                refreshDistance();
+            }
             private void refreshDistance() {
                 nextDistanceSquared = valid()
                         ? BlastCrater.arrivalSquared(dx, dz, y, center.y, radius, down, up)
